@@ -1,36 +1,60 @@
-import hashlib, os, pandas as pd, sqlalchemy as sa, diskcache as dc
+import os
+import hashlib
 from contextlib import contextmanager
-from dotenv import load_dotenv
-load_dotenv(".env")
 
+import pandas as pd
+import sqlalchemy as sa
+import diskcache as dc
+from dotenv import load_dotenv
+
+# Load environment variables from .env file (DB_HOST, DB_NAME, DB_USER, DB_PASS)
+load_dotenv()
+
+# Initialize a local on-disk cache
 _CACHE = dc.Cache(os.path.expanduser("~/.db_cache"))
 
 @contextmanager
 def _engine():
     url = sa.engine.url.URL.create(
-        "mysql+mysqldb",
+        drivername="mysql+mysqldb",
         username=os.getenv("DB_USER"),
         password=os.getenv("DB_PASS"),
         host=os.getenv("DB_HOST"),
         database=os.getenv("DB_NAME"),
     )
-    eng = sa.create_engine(url, pool_size=5, pool_recycle=1800, pool_pre_ping=True)
+    engine = sa.create_engine(
+        url,
+        pool_size=5,
+        pool_recycle=1800,
+        pool_pre_ping=True,
+    )
     try:
-        yield eng
+        yield engine
     finally:
-        eng.dispose()
+        engine.dispose()
 
-def _cache_key(sql: str) -> str:
-    return hashlib.sha256(sql.encode()).hexdigest()
 
-def run_sql(sql: str, *, refresh: bool = False, chunksize: int = 50_000) -> pd.DataFrame:
-    key = _cache_key(sql)
+def _generate_cache_key(sql: str) -> str:
+    return hashlib.sha256(sql.encode("utf-8")).hexdigest()
+
+
+def run_sql(sql: str, *, refresh: bool = False, chunksize: int = 50000) -> pd.DataFrame:
+    key = _generate_cache_key(sql)
+
+    # Return cached DataFrame if available
     if not refresh and key in _CACHE:
         return _CACHE[key]
 
-    with _engine() as eng:
-        dfs = pd.read_sql_query(sql, eng, chunksize=chunksize)
-        df = pd.concat(dfs) if isinstance(dfs, pd.io.parsers.TextFileReader) else dfs
+    # Execute query
+    with _engine() as engine:
+        if chunksize:
+            # Read in iterable chunks, then combine into one DataFrame
+            iterator = pd.read_sql_query(sql, engine, chunksize=chunksize)
+            df = pd.concat(list(iterator), ignore_index=True)
+        else:
+            # Load entire result in one shot
+            df = pd.read_sql_query(sql, engine)
 
-    _CACHE.set(key, df, expire=24 * 3600)  # 24-h TTL
+    # Store in cache for 24 hours
+    _CACHE.set(key, df, expire=24 * 3600)
     return df
