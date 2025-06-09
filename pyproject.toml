@@ -1,5 +1,5 @@
 [tool.poetry]
-name = "db-helper"
+name = "ubctgdb"
 version = "0.1.0"
 
 [tool.poetry.dependencies]
