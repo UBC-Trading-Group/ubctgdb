@@ -15,6 +15,9 @@ _CACHE = dc.Cache(os.path.expanduser("~/.db_cache"))
 
 @contextmanager
 def _engine():
+    """
+    Creates a SQLAlchemy engine for connecting to the MySQL database.
+    """
     url = sa.engine.url.URL.create(
         drivername="mysql+mysqldb",
         username=os.getenv("DB_USER"),
@@ -35,10 +38,16 @@ def _engine():
 
 
 def _generate_cache_key(sql: str) -> str:
+    """
+    Generates a unique cache key based on the SQL query string.
+    """
     return hashlib.sha256(sql.encode("utf-8")).hexdigest()
 
 
 def run_sql(sql: str, *, refresh: bool = False, chunksize: int = 50000) -> pd.DataFrame:
+    """
+    Executes a SQL query against the MySQL database and returns the result as a pandas DataFrame.
+    """
     key = _generate_cache_key(sql)
 
     # Return cached DataFrame if available
@@ -58,3 +67,9 @@ def run_sql(sql: str, *, refresh: bool = False, chunksize: int = 50000) -> pd.Da
     # Store in cache for 24 hours
     _CACHE.set(key, df, expire=24 * 3600)
     return df
+
+def get_connection_endpoint() -> str:
+    """
+    Returns the connection endpoint for the MySQL database.
+    """
+    return f"mysql://{os.getenv('DB_USER')}:{os.getenv('DB_PASS')}@{os.getenv('DB_HOST')}/{os.getenv('DB_NAME')}"
