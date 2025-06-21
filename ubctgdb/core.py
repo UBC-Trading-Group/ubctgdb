@@ -6,17 +6,21 @@ import pandas as pd
 import sqlalchemy as sa
 import diskcache as dc
 from dotenv import load_dotenv
+from .database_conn import DbConn
 
-# Load environment variables from .env file (DB_HOST, DB_NAME, DB_USER, DB_PASS)
-load_dotenv()
+connection = DbConn()
+connection.connect()
 
-# Initialize a local on-disk cache
-_CACHE = dc.Cache(os.path.expanduser("~/.db_cache"))
+
+# # Load environment variables from .env file (DB_HOST, DB_NAME, DB_USER, DB_PASS)
+# load_dotenv()
+# # Initialize a local on-disk cache
+# _CACHE = dc.Cache(os.path.expanduser("~/.db_cache"))
 
 @contextmanager
 def _engine():
     url = sa.engine.url.URL.create(
-        drivername="mysql+mysqldb",
+        drivername= os.getenv("DB_DRIVER_NAME"),
         username=os.getenv("DB_USER"),
         password=os.getenv("DB_PASS"),
         host=os.getenv("DB_HOST"),
