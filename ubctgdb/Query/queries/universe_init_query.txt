@@ -1,0 +1,4 @@
+SELECT rn.GVKEY, iln.Ticker, rn.`Date`, rn.`Returns`
+        FROM Industry_lookup_new iln 
+        INNER JOIN Rets_new rn ON iln.GVKEY=rn.GVKEY
+        WHERE iln.Industry = :sector

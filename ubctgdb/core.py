@@ -6,16 +6,16 @@ import pandas as pd
 import sqlalchemy as sa
 import diskcache as dc
 from dotenv import load_dotenv
-from .database_conn import DbConn
+from .database_conn import DBConn
 
-connection = DbConn()
-connection.connect()
+# connection = DbConn()
+# connection.connect()
 
 
 # # Load environment variables from .env file (DB_HOST, DB_NAME, DB_USER, DB_PASS)
 # load_dotenv()
 # # Initialize a local on-disk cache
-# _CACHE = dc.Cache(os.path.expanduser("~/.db_cache"))
+# _CACHE = dc.Cache(os.path.expanduser("~/.db_cache"))s
 
 @contextmanager
 def _engine():
