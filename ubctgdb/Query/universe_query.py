@@ -3,6 +3,7 @@ from ubctgdb.database_conn import DBConn
 from ubctgdb.Utilities.query_reader import QueryReader
 from sqlalchemy import text
 import random
+import pandas as pd
 
 
 class UniverseQuery:
@@ -22,8 +23,6 @@ class UniverseQuery:
         '''
         uses resevoir pooling algorithm to uniformly choose subset of universe query
         '''
-
-        print(f"the sector is {str(self.sector)}")
         init_query = self.query_reader.get_query_text("universe_init_query")
         sessionmaker = self.conn_instance.get_session()
 
@@ -31,7 +30,6 @@ class UniverseQuery:
             stream = await session.stream(text(init_query), {"sector": str(self.sector)})
             reservoir, i = [], 0
             async for item in stream:
-                print(item)
                 if i < self.universe_capacity:
                     reservoir.append(item)
                 else:
@@ -39,7 +37,7 @@ class UniverseQuery:
                     if j < self.universe_capacity:
                         reservoir[j] = item
                 i += 1 
-            return reservoir  
+            return pd.DataFrame(reservoir, columns=["GVKey", "Ticker", "Date", "Returns"])  
 
    
     async def init_universe(self):

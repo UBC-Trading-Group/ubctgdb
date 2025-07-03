@@ -4,7 +4,7 @@ import asyncio
 
 
 async def main():
-    universe_query = await QueryFactory.create_universe_query(Sector.ENERGY) 
+    universe_query = await QueryFactory.create_universe_query(Sector.ENERGY, capacity=10) 
     test = await universe_query.init_universe_with_resevoir()
     print(test)
 
