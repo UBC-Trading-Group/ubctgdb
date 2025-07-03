@@ -1,6 +1,7 @@
 from ubctgdb.Constants.constants import Sector
 from ubctgdb.database_conn import DBConn
 from ubctgdb.Utilities.query_reader import QueryReader
+from ubctgdb.Constants.constants import Ratio
 from sqlalchemy import text
 import random
 import pandas as pd
@@ -42,5 +43,8 @@ class UniverseQuery:
    
     async def init_universe(self):
         init_query = self.query_reader.get_query_text("universe_init_query")
-        res = await self.conn_instance.execute(text(init_query), {"sector": str(self.sector)})
-        return res
+        return await self.conn_instance.execute(text(init_query), {"sector": str(self.sector)})
+    
+    async def get_universe_metric(self, ratio: Ratio):
+        ratio_query = self.query_reader.get_query_text("ratios_query")
+        return await self.conn_instance.execute(text(ratio_query), {"ratio": str(ratio)})

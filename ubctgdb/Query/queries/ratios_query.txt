@@ -1,0 +1,4 @@
+SELECT Ticker, public_date, :ratio
+FROM Industry_lookup_new iln 
+INNER JOIN universe_monthly_ratios umr ON iln.GVKEY=umr.GVKEY
+WHERE iln.Industry = "Energy"
