@@ -58,10 +58,17 @@ class DbConn:
             raise
         return cls
     
+
+    @classmethod
+    @require_connection
+    async def execute_stream(cls, query, params=None):
+        async with cls._sessionmaker() as session:
+            return await session.stream(query, params or {})
+
+
     @classmethod
     @require_connection
     async def execute(cls, query, params=None):
         async with cls._sessionmaker() as session:
-            result = await session.execute(query, params or {})
-            return result.fetchall()
-    
+            result = await session.stream(query, params or {})
+            return await result.fetchall()
