@@ -1,6 +1,8 @@
 from ubctgdb.Constants.constants import Sector
 from ubctgdb.database_conn import DbConn
-import pandas as pd
+from sqlalchemy import text
+import asyncio
+
 
 class UniverseQuery:
 
@@ -13,16 +15,17 @@ class UniverseQuery:
         pass 
 
     #current hardcode join on main tables
-    def init_tables(self):
-        #simple inner_join long running query
-        conn = DbConn().get_conn()
-        sql = '''
-        SELECT Permno, Returns
-        FROM ubctg.Industry_lookup ind, ubctg.Returns r
-        WHERE ind.Ticker = r.Ticker AND ind.Industry = %s
+    async def init_universe(self):
+        init_query = '''
+        SELECT rn.GVKEY, iln.Ticker, rn.`Date`, rn.`Returns`
+        FROM Industry_lookup_new iln 
+        INNER JOIN Rets_new rn ON iln.GVKEY=rn.GVKEY
+        WHERE iln.Industry = :sector
         '''
-        df = pd.read_sql_query(sql, conn.connection, params=[self.sector])
-        print(df)
+        conn = await DbConn.connect()
+        res = await conn.execute(text(init_query), {"sector": str(self.sector)})
+
+
 
  
     def select(self):
@@ -35,8 +38,9 @@ class UniverseQuery:
         pass 
 
 #test API
+
 test_universe = UniverseQuery(Sector.ENERGY)
-test_universe.init_tables()
+asyncio.run(test_universe.init_universe())
 
 
 
