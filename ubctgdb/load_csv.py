@@ -126,10 +126,6 @@ def _run_mysqlsh_import(
 
     if replace_duplicates:
         cmd.append("--replaceDuplicates")
-        cmd.append("--columns=" + ",".join(cols))
-
-    if replace_duplicates:
-        cmd.append("--replaceDuplicates")
 
     # Show a scrubbed command line
     safe_cmd = " ".join(
@@ -177,7 +173,7 @@ def load_csv(
 
     Parameters
     ----------
-    empty_as_null : bool, default True
+    empty_as_null : bool, default False
         Convert **all** empty strings to SQL `NULL` using `NULLIF(@var,'')`.
     """
 
