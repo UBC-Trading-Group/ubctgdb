@@ -132,6 +132,7 @@ def load_csv(
     parse_dates: Sequence[str] | None = None,
     retries: int = 5,
     show_progress: bool = True,
+    skip_rows: int = 1,                       # header
     threads: int = 8,
 ) -> None:
     """
@@ -206,7 +207,7 @@ def load_csv(
             "schema"            : schema,
             "table"             : table,
             "dialect"           : "csv-unix",
-            "skipRows"          : 1,
+            "skipRows"          : skip_rows,
             "columns"           : uservars,
             "decodeColumns"     : decode,
             "onDuplicateKeyUpdate": duplicate_mode == "replace",
