@@ -1,23 +1,19 @@
 from __future__ import annotations
 
-import json
 import os
 import shlex
 import subprocess
 import sys
 from collections import OrderedDict
 from pathlib import Path
-from typing import Dict, Iterable, List, Mapping, Optional
+from typing import Iterable, List, Mapping, Optional
 
 import pandas as pd
 import sqlalchemy as sa
-from dotenv import load_dotenv
+from dotenv import load_dotenv, find_dotenv
 
-# --------------------------------------------------------------------------- #
-#  Environment / configuration
-# --------------------------------------------------------------------------- #
 
-load_dotenv()  # DB_HOST, DB_NAME, DB_USER, DB_PASS, DB_PORT (optional)
+load_dotenv(find_dotenv(usecwd=True), override=False)
 
 DB_PORT = int(os.getenv("DB_PORT", 3306))
 
@@ -38,51 +34,55 @@ _SQL_TYPE_MAP = {
 
 
 def _infer_col_types(csv_path: Path, n_rows: int = 20_000) -> "OrderedDict[str, str]":
-    """Read *n_rows* from *csv_path* and guess SQL column types."""
+    """Scan *n_rows* of *csv_path* and guess reasonable MySQL column types."""
     sample = pd.read_csv(csv_path, nrows=n_rows)
     col_types: "OrderedDict[str, str]" = OrderedDict()
     for col, dtype in sample.dtypes.items():
-        sql_type = _SQL_TYPE_MAP.get(str(dtype), "TEXT")
-        col_types[col] = sql_type
+        col_types[col] = _SQL_TYPE_MAP.get(str(dtype), "TEXT")
     return col_types
 
 
-def _sqlalchemy_engine() -> sa.engine.Engine:
-    """Return an SQLAlchemy engine (MySQL, PyMySQL driver)."""
+def _sqlalchemy_engine(host: str, port: int) -> sa.engine.Engine:
+    """Return an SQLAlchemy engine using PyMySQL."""
     url = sa.engine.url.URL.create(
         drivername="mysql+pymysql",
         username=os.getenv("DB_USER"),
         password=os.getenv("DB_PASS"),
-        host=os.getenv("DB_HOST"),
-        port=DB_PORT,
+        host=host,
+        port=port,
     )
     return sa.create_engine(url, pool_recycle=1800, pool_pre_ping=True)
 
 
 def _format_mysql_identifier(name: str) -> str:
-    """Escape a MySQL identifier with back‑ticks."""
     if "`" in name:
         raise ValueError("Back‑tick found in identifier: %s" % name)
     return f"`{name}`"
 
 
 def _create_table(
+    host: str,
+    port: int,
     schema: str,
     table: str,
     col_types: Mapping[str, str],
     *,
     if_not_exists: bool = True,
 ) -> None:
-    """Create *schema.table* using *col_types* (ordered)."""
     cols_sql = ",\n  ".join(f"{_format_mysql_identifier(c)} {t}" for c, t in col_types.items())
-    stmt = f"CREATE TABLE {'IF NOT EXISTS ' if if_not_exists else ''}{_format_mysql_identifier(schema)}.{_format_mysql_identifier(table)} (\n  {cols_sql}\n) ENGINE=InnoDB;"
-    with _sqlalchemy_engine().begin() as conn:
+    stmt = (
+        f"CREATE TABLE {'IF NOT EXISTS ' if if_not_exists else ''}"
+        f"{_format_mysql_identifier(schema)}.{_format_mysql_identifier(table)} (\n  {cols_sql}\n) ENGINE=InnoDB;"
+    )
+    with _sqlalchemy_engine(host, port).begin() as conn:
         conn.execute(sa.text(f"CREATE DATABASE IF NOT EXISTS {_format_mysql_identifier(schema)};"))
         conn.execute(sa.text(stmt))
 
 
 def _run_mysqlsh_import(
     csv_path: Path,
+    host: str,
+    port: int,
     schema: str,
     table: str,
     columns: Iterable[str],
@@ -92,11 +92,10 @@ def _run_mysqlsh_import(
     skip_rows: int = 0,
     replace_duplicates: bool = False,
 ) -> None:
-    """Invoke `mysqlsh util import-table` via subprocess."""
     user = os.getenv("DB_USER")
     password = os.getenv("DB_PASS")
-    host = os.getenv("DB_HOST")
-    uri = f"mysql://{user}:{password}@{host}:{DB_PORT}"
+
+    uri = f"mysql://{user}:{password}@{host}:{port}"
 
     cmd: List[str] = [
         "mysqlsh",
@@ -112,12 +111,14 @@ def _run_mysqlsh_import(
         f"--skipRows={skip_rows}",
     ]
     if columns:
-        cmd.append(f"--columns={','.join(columns)}")
+        cmd.append("--columns=" + ",".join(columns))
     if replace_duplicates:
         cmd.append("--replaceDuplicates")
 
-    # For security, replace password in printed command with ***
-    printable_cmd = " ".join(shlex.quote(p) if p != uri else uri.replace(password, "***") for p in cmd)
+    printable_cmd = " ".join(
+        shlex.quote(part.replace(password, "***")) if password and part.startswith("mysql://") else shlex.quote(part)
+        for part in cmd
+    )
     print("[mysqlsh]", printable_cmd, file=sys.stderr)
 
     result = subprocess.run(cmd, capture_output=True, text=True)
@@ -143,33 +144,47 @@ def load_csv(
     threads: int = 4,
     skip_rows: int = 0,
     replace_duplicates: bool = False,
+    dotenv_path: Optional[str | Path] = None,
 ) -> None:
-    """Bulk‑load *csv_path* into *schema.table* using MySQL Shell.
+    """Bulk‑load *csv_path* into *schema.table* through MySQL Shell.
 
     Parameters
     ----------
-    csv_path:
-        Path to the input CSV file.
-    table:
+    csv_path : str | Path
+        Path to the CSV file on disk.
+    table : str
         Target table name.
-    schema:
-        Database name. Defaults to ``DB_NAME`` from environment.
-    col_types:
-        Explicit `{column: sql_type}` mapping. If *None*, a schema is
-        inferred from the first *infer_rows* rows of the CSV.
-    infer_rows:
-        Number of rows to scan when inferring types (ignored if
-        *col_types* provided).
-    dialect:
-        One of ``default``, ``csv``, ``csv-unix``, ``tsv``, or ``json``.
-    threads:
-        Number of concurrent load threads.
-    skip_rows:
-        Rows to skip at file start (e.g. header row).
-    replace_duplicates:
-        If ``True``, conflicting primary/unique keys are *replaced* instead
-        of being skipped. Maps to ``--replaceDuplicates`` in mysqlsh.
+    schema : str | None
+        Database name (defaults to ``DB_NAME`` from env).
+    col_types : Mapping[str, str] | None
+        Explicit column‑type mapping.  If *None* we infer from the first
+        *infer_rows* rows.
+    infer_rows : int
+        Sample size for type inference.
+    dialect : str
+        csv‑unix | csv | tsv | json
+    threads : int
+        Parallel load threads.
+    skip_rows : int
+        Lines to skip at top of file (e.g. header row).
+    replace_duplicates : bool
+        Passes `--replaceDuplicates` to `mysqlsh`.
+    dotenv_path : str | Path | None
+        Explicit path to a .env; overrides auto‑detection.
     """
+
+    # Reload env if an explicit dotenv_path is supplied.
+    if dotenv_path:
+        load_dotenv(dotenv_path, override=False)
+
+    host = os.getenv("DB_HOST")
+    port = DB_PORT
+
+    if not host:
+        raise EnvironmentError(
+            "DB_HOST not set.  Either export it, add it to .env, or pass "
+            "dotenv_path=`…` so we can load it."
+        )
 
     csv_path = Path(csv_path).expanduser().resolve()
     if not csv_path.exists():
@@ -179,16 +194,18 @@ def load_csv(
     if not schema:
         raise ValueError("Schema not provided and DB_NAME env var is not set.")
 
-    # Infer schema if necessary
+    # Infer SQL types if the user didn’t supply them
     if col_types is None:
         col_types = _infer_col_types(csv_path, n_rows=infer_rows)
 
-    # Ensure table exists
-    _create_table(schema, table, col_types, if_not_exists=True)
+    # Ensure target table exists
+    _create_table(host, port, schema, table, col_types, if_not_exists=True)
 
-    # Launch mysqlsh import
+    # Perform high‑speed import via mysqlsh
     _run_mysqlsh_import(
         csv_path=csv_path,
+        host=host,
+        port=port,
         schema=schema,
         table=table,
         columns=col_types.keys(),
