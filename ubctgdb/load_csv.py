@@ -143,13 +143,7 @@ def _run_mysqlsh_import(
         # Fallback: capture output all-at-once (old behaviour)
         result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode != 0:
-            raise RuntimeError(
-                "mysqlsh import failed:
-STDOUT:
-" + result.stdout + "
-STDERR:
-" + result.stderr
-            )
+            raise RuntimeError("mysqlsh import failed:\nSTDOUT:\n" + result.stdout + "\nSTDERR:\n" + result.stderr)
     print(result.stdout, file=sys.stderr)
 
 
