@@ -12,7 +12,6 @@ import pandas as pd
 import sqlalchemy as sa
 from dotenv import load_dotenv, find_dotenv
 
-
 load_dotenv(find_dotenv(usecwd=True), override=False)
 
 DB_PORT = int(os.getenv("DB_PORT", 3306))
@@ -91,6 +90,7 @@ def _run_mysqlsh_import(
     threads: int = 4,
     skip_rows: int = 0,
     replace_duplicates: bool = False,
+    stream: bool = True,
 ) -> None:
     user = os.getenv("DB_USER")
     password = os.getenv("DB_PASS")
@@ -121,11 +121,35 @@ def _run_mysqlsh_import(
     )
     print("[mysqlsh]", printable_cmd, file=sys.stderr)
 
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    if result.returncode != 0:
-        raise RuntimeError(
-            "mysqlsh import failed:\nSTDOUT:\n" + result.stdout + "\nSTDERR:\n" + result.stderr
-        )
+    if stream:
+        # Stream mysqlsh's mixed progress bar / log output live so the user
+        # sees the spinner and percentage updates instead of only after the
+        # process ends.
+        with subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        ) as proc:
+            assert proc.stdout is not None  # mypy guard
+            for line in proc.stdout:
+                # The progress bar uses carriage returns; print as-is.
+                print(line, end="", file=sys.stderr)
+            rc = proc.wait()
+        if rc != 0:
+            raise RuntimeError("mysqlsh import failed – see output above for details")
+    else:
+        # Fallback: capture output all-at-once (old behaviour)
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            raise RuntimeError(
+                "mysqlsh import failed:
+STDOUT:
+" + result.stdout + "
+STDERR:
+" + result.stderr
+            )
     print(result.stdout, file=sys.stderr)
 
 
