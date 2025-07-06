@@ -115,12 +115,17 @@ def _run_mysqlsh_import(
 
     cols = list(columns)
     if empty_as_null:
-        # Map each file field to an @var, then NULLIF(@var,'') into real column
-        col_vars = [f"@{c}" for c in cols]
-        set_clause = ",".join(f"{c}=NULLIF(@{c},'')" for c in cols)
-        cmd.append("--columns=" + ",".join(col_vars))
-        cmd.append("--setFieldDefault=" + set_clause)
+        # For each field produce a user variable then set column = NULLIF(@var,'')
+        col_spec_parts: List[str] = []
+        for c in cols:
+            col_spec_parts.append(f"@{c}")
+            col_spec_parts.append(f"{c}=NULLIF(@{c},'')")
+        cmd.append("--columns=" + ",".join(col_spec_parts))
     else:
+        cmd.append("--columns=" + ",".join(cols))
+
+    if replace_duplicates:
+        cmd.append("--replaceDuplicates")
         cmd.append("--columns=" + ",".join(cols))
 
     if replace_duplicates:
