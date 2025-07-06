@@ -1,244 +1,199 @@
 from __future__ import annotations
 
-
-# at the very top, before any other imports
-try:
-    import mysqlsh            # available only inside MySQL Shell
-except ImportError:
-    import os, sys, shutil, subprocess
-    mshell = shutil.which("mysqlsh")
-    if mshell is None:
-        raise RuntimeError("mysqlsh not found – install MySQL Shell 8+ first")
-    # re-launch the same script inside mysqlsh --py
-    subprocess.check_call([mshell, "--py"] + sys.argv)
-    sys.exit(0)
-
-# --------------------------------------------------------------------------- #
-#  Load .env variables early — even when running under plain Python           #
-# --------------------------------------------------------------------------- #
-try:
-    from dotenv import load_dotenv
-    # Loads variables from the nearest `.env`. Falls back silently if the
-    # package is not installed (common in the mysqlsh-embedded interpreter).
-    load_dotenv()
-except ModuleNotFoundError:
-    # mysqlsh’s Python often lacks external packages; keep going and rely on
-    # env vars provided by the shell / CI instead.
-    pass
-
-
-import csv, math, os, random, time, warnings
+import json
+import os
+import shlex
+import subprocess
+import sys
+from collections import OrderedDict
 from pathlib import Path
-from typing import Mapping, Sequence
+from typing import Dict, Iterable, List, Mapping, Optional
 
 import pandas as pd
-
-try:
-    import mysqlsh                    # MySQL Shell ≥8.0
-except ModuleNotFoundError as exc:    # graceful failure if user hasn’t installed it
-    mysqlsh = None
+import sqlalchemy as sa
+from dotenv import load_dotenv
 
 # --------------------------------------------------------------------------- #
-# 1.  helpers
+#  Environment / configuration
 # --------------------------------------------------------------------------- #
-_PANDAS2MYSQL = {
-    "int64":      "BIGINT",
-    "float64":    "DOUBLE",
-    "object":     "TEXT",
+
+load_dotenv()  # DB_HOST, DB_NAME, DB_USER, DB_PASS, DB_PORT (optional)
+
+DB_PORT = int(os.getenv("DB_PORT", 3306))
+
+
+# --------------------------------------------------------------------------- #
+#  Helpers
+# --------------------------------------------------------------------------- #
+
+_SQL_TYPE_MAP = {
+    "int64": "BIGINT",
+    "Int64": "BIGINT",
+    "float64": "DOUBLE",
+    "object": "TEXT",
+    "string": "TEXT",
     "datetime64[ns]": "DATETIME",
+    "bool": "TINYINT(1)",
 }
 
-_SQL_MODE_LAX = (
-    "STRICT_TRANS_TABLES,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION"
-)
 
-def _map_dtype(series: pd.Series) -> str:
-    """
-    Rough but serviceable mapping from pandas dtypes to MySQL column types.
-    Guesses DECIMAL(p,s) for floats with few decimals.
-    """
-    if pd.api.types.is_integer_dtype(series):
-        return "BIGINT"
-    if pd.api.types.is_float_dtype(series):
-        # decide between DECIMAL and DOUBLE
-        dp = series.dropna().apply(lambda x: abs(x - round(x))).max()
-        dp = int(round(-math.log10(dp), 0)) if dp else 0
-        if dp <= 6:
-            width = max(len(f"{v:.0f}") for v in series.dropna()) + dp + 1
-            return f"DECIMAL({width},{dp})"
-        return "DOUBLE"
-    return _PANDAS2MYSQL.get(str(series.dtype), "TEXT")
+def _infer_col_types(csv_path: Path, n_rows: int = 20_000) -> "OrderedDict[str, str]":
+    """Read *n_rows* from *csv_path* and guess SQL column types."""
+    sample = pd.read_csv(csv_path, nrows=n_rows)
+    col_types: "OrderedDict[str, str]" = OrderedDict()
+    for col, dtype in sample.dtypes.items():
+        sql_type = _SQL_TYPE_MAP.get(str(dtype), "TEXT")
+        col_types[col] = sql_type
+    return col_types
 
 
-def _infer_schema(csv_file: str | Path,
-                  sample_rows: int = 20_000,
-                  dtype_overrides: Mapping[str, str] | None = None,
-                  parse_dates: Sequence[str] | None = None,
-) -> Mapping[str, str]:
-    """
-    Peek at the first N rows to guess sensible column ↦ MySQL type mapping.
-    dtype_overrides lets the caller force/override the guess.
-    """
-    sample = pd.read_csv(csv_file,
-                         nrows=sample_rows,
-                         parse_dates=parse_dates,
-                         low_memory=False)
-    schema = {col: _map_dtype(sample[col]) for col in sample.columns}
-    if dtype_overrides:
-        schema.update(dtype_overrides)
-    return schema
-
-
-def _render_create_sql(schema: str,
-                       table: str,
-                       col_types: Mapping[str, str],
-                       primary_keys: Sequence[str] | None = None,
-                       duplicate_mode: str = "ignore",
-) -> str:
-    """
-    Build a CREATE TABLE IF NOT EXISTS statement compatible with util.import_table.
-    """
-    cols = ",\n  ".join(f"`{c}` {t}" for c, t in col_types.items())
-    pk   = f",\n  PRIMARY KEY ({', '.join(primary_keys)})" if primary_keys else ""
-    eng  = "ENGINE = InnoDB"
-    return (
-        f"CREATE TABLE IF NOT EXISTS `{schema}`.`{table}` (\n  "
-        f"{cols}{pk}\n) {eng};"
-    )
-
-
-# --------------------------------------------------------------------------- #
-# 0-bis. Build a MySQL-Shell URI from your .env variables
-# --------------------------------------------------------------------------- #
-def _mysqlx_uri_from_env() -> str:
-    """
-    Construct a mysqlx://user:pass@host:port URI from DB_* variables
-    (falls back to port 33060 unless DB_PORT is set).
-    """
-    host   = os.getenv("DB_HOST")
-    user   = os.getenv("DB_USER")
-    passwd = os.getenv("DB_PASS")
-    port   = os.getenv("DB_PORT", "33060")
-
-    if not all([host, user, passwd]):
-        raise EnvironmentError(
-            "DB_HOST, DB_USER and DB_PASS must be defined in your .env "
-            "to build the MySQL-Shell connection URI."
-        )
-    return f"mysqlx://{user}:{passwd}@{host}:{port}"
-
-
-# --------------------------------------------------------------------------- #
-# 2.  Public entry point
-# --------------------------------------------------------------------------- #
-def load_csv(
-    csv_path: str | Path,
-    *,
-    table: str,
-    schema: str | None = None,
-    primary_keys: Sequence[str] | None = None,
-    col_types: Mapping[str, str] | None = None,
-    duplicate_mode: str = "ignore",             # "ignore" | "replace"
-    sql_mode_lax: str = _SQL_MODE_LAX,
-    sample_rows: int = 20_000,
-    dtype_overrides: Mapping[str, str] | None = None,
-    parse_dates: Sequence[str] | None = None,
-    retries: int = 5,
-    show_progress: bool = True,
-    skip_rows: int = 1,                       # header
-    threads: int = 8,
-) -> None:
-    """
-    High-level wrapper around MySQL-Shell util.import_table().
-
-    Parameters
-    ----------
-    csv_path : local path to the CSV file to ingest
-    table    : destination table name (will be auto-created if missing)
-    schema   : destination schema; defaults to DB_NAME in .env
-    … plus various tuning knobs documented in the README
-    """
-    csv_path = Path(csv_path).expanduser().resolve()
-    if not csv_path.is_file():
-        raise FileNotFoundError(csv_path)
-
-    if mysqlsh is None:
-        raise RuntimeError(
-            "load_csv() needs the mysql-shell Python module. "
-            "Install MySQL Shell 8+ and ensure the script runs either "
-            "inside `mysqlsh --py` or spawns mysqlsh via subprocess."
-        )
-
-    # ------------------------------------------------------------------ #
-    # A.  infer schema if the caller didn't provide one explicitly
-    # ------------------------------------------------------------------ #
-    if col_types is None:
-        print(f"Scanning first {sample_rows:,} rows to infer schema…")
-        col_types = _infer_schema(
-            csv_path, sample_rows, dtype_overrides, parse_dates
-        )
-        print("Inferred schema:")
-        for col, typ in col_types.items():
-            print(f"  {col:<10} {typ}")
-
-    if schema is None:
-        schema = os.getenv("DB_NAME") or "public"
-
-    # ------------------------------------------------------------------ #
-    # B.  create table if it doesn’t exist
-    # ------------------------------------------------------------------ #
-    create_sql = _render_create_sql(schema, table, col_types,
-                                    primary_keys, duplicate_mode)
-
-    # We rely on sqlalchemy only for the DDL part to avoid manual parsing.
-    import sqlalchemy as sa
-    engine_url = sa.engine.url.URL.create(
-        drivername="mysql+mysqldb",
+def _sqlalchemy_engine() -> sa.engine.Engine:
+    """Return an SQLAlchemy engine (MySQL, PyMySQL driver)."""
+    url = sa.engine.url.URL.create(
+        drivername="mysql+pymysql",
         username=os.getenv("DB_USER"),
         password=os.getenv("DB_PASS"),
         host=os.getenv("DB_HOST"),
-        port=os.getenv("DB_PORT", "3306"),
-        database=schema,
+        port=DB_PORT,
     )
-    with sa.create_engine(engine_url).begin() as conn:
-        conn.execute(sa.text(create_sql))
+    return sa.create_engine(url, pool_recycle=1800, pool_pre_ping=True)
 
-    # ------------------------------------------------------------------ #
-    # C.  use MySQL-Shell for the heavy lifting
-    # ------------------------------------------------------------------ #
-    uri = _mysqlx_uri_from_env()
 
-    sess = mysqlsh.mysql.get_session(uri)
-    try:
-        sess.run_sql(f"SET @@session.sql_mode = '{sql_mode_lax}';")
+def _format_mysql_identifier(name: str) -> str:
+    """Escape a MySQL identifier with back‑ticks."""
+    if "`" in name:
+        raise ValueError("Back‑tick found in identifier: %s" % name)
+    return f"`{name}`"
 
-        # column list – encode all to user-variables first so we can NULLIF('')
-        uservars = [f"@{c}" for c in col_types]
-        decode   = {col: f"NULLIF(@{col}, '')" for col in col_types}
 
-        import_cfg = {
-            "schema"            : schema,
-            "table"             : table,
-            "dialect"           : "csv-unix",
-            "skipRows"          : skip_rows,
-            "columns"           : uservars,
-            "decodeColumns"     : decode,
-            "onDuplicateKeyUpdate": duplicate_mode == "replace",
-            "threads"           : threads,
-        }
+def _create_table(
+    schema: str,
+    table: str,
+    col_types: Mapping[str, str],
+    *,
+    if_not_exists: bool = True,
+) -> None:
+    """Create *schema.table* using *col_types* (ordered)."""
+    cols_sql = ",\n  ".join(f"{_format_mysql_identifier(c)} {t}" for c, t in col_types.items())
+    stmt = f"CREATE TABLE {'IF NOT EXISTS ' if if_not_exists else ''}{_format_mysql_identifier(schema)}.{_format_mysql_identifier(table)} (\n  {cols_sql}\n) ENGINE=InnoDB;"
+    with _sqlalchemy_engine().begin() as conn:
+        conn.execute(sa.text(f"CREATE DATABASE IF NOT EXISTS {_format_mysql_identifier(schema)};"))
+        conn.execute(sa.text(stmt))
 
-        for attempt in range(1, retries + 1):
-            try:
-                mysqlsh.util.import_table(str(csv_path), import_cfg)
-                if show_progress:
-                    print("✅  import finished")
-                break
-            except Exception as err:
-                if attempt == retries:
-                    raise
-                wait = 2 ** attempt + random.random()
-                warnings.warn(f"Attempt {attempt} failed: {err}. Retrying in "
-                              f"{wait:.1f}s …", RuntimeWarning)
-                time.sleep(wait)
-    finally:
-        sess.close()
+
+def _run_mysqlsh_import(
+    csv_path: Path,
+    schema: str,
+    table: str,
+    columns: Iterable[str],
+    *,
+    dialect: str = "csv-unix",
+    threads: int = 4,
+    skip_rows: int = 0,
+    replace_duplicates: bool = False,
+) -> None:
+    """Invoke `mysqlsh util import-table` via subprocess."""
+    user = os.getenv("DB_USER")
+    password = os.getenv("DB_PASS")
+    host = os.getenv("DB_HOST")
+    uri = f"mysql://{user}:{password}@{host}:{DB_PORT}"
+
+    cmd: List[str] = [
+        "mysqlsh",
+        uri,
+        "--",
+        "util",
+        "import-table",
+        str(csv_path),
+        f"--schema={schema}",
+        f"--table={table}",
+        f"--dialect={dialect}",
+        f"--threads={threads}",
+        f"--skipRows={skip_rows}",
+    ]
+    if columns:
+        cmd.append(f"--columns={','.join(columns)}")
+    if replace_duplicates:
+        cmd.append("--replaceDuplicates")
+
+    # For security, replace password in printed command with ***
+    printable_cmd = " ".join(shlex.quote(p) if p != uri else uri.replace(password, "***") for p in cmd)
+    print("[mysqlsh]", printable_cmd, file=sys.stderr)
+
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(
+            "mysqlsh import failed:\nSTDOUT:\n" + result.stdout + "\nSTDERR:\n" + result.stderr
+        )
+    print(result.stdout, file=sys.stderr)
+
+
+# --------------------------------------------------------------------------- #
+#  Public API
+# --------------------------------------------------------------------------- #
+
+def load_csv(
+    *,
+    csv_path: str | Path,
+    table: str,
+    schema: Optional[str] = None,
+    col_types: Optional[Mapping[str, str]] = None,
+    infer_rows: int = 20_000,
+    dialect: str = "csv-unix",
+    threads: int = 4,
+    skip_rows: int = 0,
+    replace_duplicates: bool = False,
+) -> None:
+    """Bulk‑load *csv_path* into *schema.table* using MySQL Shell.
+
+    Parameters
+    ----------
+    csv_path:
+        Path to the input CSV file.
+    table:
+        Target table name.
+    schema:
+        Database name. Defaults to ``DB_NAME`` from environment.
+    col_types:
+        Explicit `{column: sql_type}` mapping. If *None*, a schema is
+        inferred from the first *infer_rows* rows of the CSV.
+    infer_rows:
+        Number of rows to scan when inferring types (ignored if
+        *col_types* provided).
+    dialect:
+        One of ``default``, ``csv``, ``csv-unix``, ``tsv``, or ``json``.
+    threads:
+        Number of concurrent load threads.
+    skip_rows:
+        Rows to skip at file start (e.g. header row).
+    replace_duplicates:
+        If ``True``, conflicting primary/unique keys are *replaced* instead
+        of being skipped. Maps to ``--replaceDuplicates`` in mysqlsh.
+    """
+
+    csv_path = Path(csv_path).expanduser().resolve()
+    if not csv_path.exists():
+        raise FileNotFoundError(csv_path)
+
+    schema = schema or os.getenv("DB_NAME")
+    if not schema:
+        raise ValueError("Schema not provided and DB_NAME env var is not set.")
+
+    # Infer schema if necessary
+    if col_types is None:
+        col_types = _infer_col_types(csv_path, n_rows=infer_rows)
+
+    # Ensure table exists
+    _create_table(schema, table, col_types, if_not_exists=True)
+
+    # Launch mysqlsh import
+    _run_mysqlsh_import(
+        csv_path=csv_path,
+        schema=schema,
+        table=table,
+        columns=col_types.keys(),
+        dialect=dialect,
+        threads=threads,
+        skip_rows=skip_rows,
+        replace_duplicates=replace_duplicates,
+    )
