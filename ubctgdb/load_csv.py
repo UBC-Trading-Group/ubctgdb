@@ -4,6 +4,8 @@ import os
 import sys
 import subprocess
 import tempfile
+import csv
+
 from collections import OrderedDict
 from pathlib import Path
 from typing import Mapping, Optional
@@ -20,8 +22,6 @@ def _clean_csv_to_temp(src_path: Path) -> Path:
     Stream *src_path* and write a temp CSV where every empty cell or
     literal 'NaN' becomes the NULL token '\N'.  Returns the temp path.
     """
-    import csv
-
     fd, tmp_name = tempfile.mkstemp(
         suffix=".csv", prefix="clean_", dir=src_path.parent
     )
@@ -190,24 +190,7 @@ def load_csv(
     preprocess: bool = True,
     dotenv_path: Optional[str | Path] = None,
 ) -> None:
-    """
-    Stream-clean a CSV and load it into MySQL at wire-speed.
-
-    Parameters
-    ----------
-    csv_path : str | Path
-        Original CSV file.
-    table, schema : str
-        Destination table and schema.
-    col_types : dict, optional
-        Mapping {column: sql_type}.  If omitted the first ``infer_rows``
-        will be scanned with pandas to guess types.
-    preprocess : bool, default True
-        If True, run the streaming null-clean pass that rewrites empty
-        cells / 'NaN' to ``\\N``.  Set False only if your file is *already*
-        null-safe.
-    """
-
+    
     if dotenv_path:
         load_dotenv(dotenv_path, override=False)
 
