@@ -111,13 +111,16 @@ def _run_mysqlsh_import(
 
     cols = list(columns)
     if empty_as_null:
-        # When converting empty to NULL, we must use user variables (@col) in the
-        # 'columns' option and then use the 'set' option to perform the transformation.
-        # This generates the correct `LOAD DATA ... (@col1, @col2) SET col1=NULLIF(...)` syntax.
-        user_vars = [f"@{c}" for c in cols]
-        set_expressions = [f"{c}=NULLIF(@{c},'')" for c in cols]
-        options["columns"] = user_vars
-        options["set"] = set_expressions
+        # This is the correct, documented way to perform transformations.
+        # 1. Read CSV data into user variables via the 'columns' option.
+        options["columns"] = [f"@{c}" for c in cols]
+        
+        # 2. Use 'columnOptions' to define the expressions that set the
+        #    final table columns from the user variables.
+        column_opts = {}
+        for c in cols:
+            column_opts[c] = {"expression": f"NULLIF(@{c}, '')"}
+        options["columnOptions"] = column_opts
     else:
         # Simple case: map CSV columns directly to table columns.
         options["columns"] = cols
