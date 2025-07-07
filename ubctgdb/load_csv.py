@@ -77,7 +77,7 @@ def _create_table(
 
 
 # ---------------------------------------------------------------------------
-#  mysqlsh wrapper
+#  mysqlsh wrapper 
 # ---------------------------------------------------------------------------
 
 def _run_mysqlsh_import(
@@ -92,59 +92,82 @@ def _run_mysqlsh_import(
     threads: int,
     skip_rows: int,
     replace_duplicates: bool,
-    stream: bool,
     empty_as_null: bool,
 ) -> None:
     user = os.getenv("DB_USER")
     password = os.getenv("DB_PASS")
 
     uri = f"mysql://{user}:{password}@{host}:{port}"
+
+    # --- Build the options dictionary for the mysqlsh Python API ---
+    options = {
+        "schema": schema,
+        "table": table,
+        "dialect": dialect,
+        "threads": threads,
+        "skipRows": skip_rows,
+        "replaceDuplicates": replace_duplicates,
+    }
+
+    cols = list(columns)
+    if empty_as_null:
+        # For each field produce a user variable then set column = NULLIF(@var,'')
+        # This is passed as a Python list of strings, which is robust.
+        col_spec_parts: List[str] = []
+        for c in cols:
+            col_spec_parts.append(f"@{c}")
+            # Use single quotes for the SQL empty string literal ''
+            col_spec_parts.append(f"{c}=NULLIF(@{c},'')")
+        options["columns"] = col_spec_parts
+    else:
+        options["columns"] = cols
+
+    # --- Construct the Python script to be executed by mysqlsh ---
+    # We build a Python script as a string and pass it to mysqlsh via `-e`.
+    # This completely avoids command-line argument parsing issues.
+    # Note: util.import_table is the Python API equivalent of util import-table.
+    # The csv_path.as_posix() ensures cross-platform compatibility for the path string.
+    py_script = f"""
+import sys
+try:
+    util.import_table(
+        r'{csv_path.as_posix()}',
+        {options}
+    )
+    print("Import successful.")
+except Exception as e:
+    print(f"ERROR: An error occurred during import: {{e}}", file=sys.stderr)
+    sys.exit(1)
+"""
+
     cmd: List[str] = [
         "mysqlsh",
         uri,
-        "--",
-        "util",
-        "import-table",
-        str(csv_path),
-        f"--schema={schema}",
-        f"--table={table}",
-        f"--dialect={dialect}",
-        f"--threads={threads}",
-        f"--skipRows={skip_rows}",
+        "--py",  # Switch to Python mode
+        "-e",    # Execute the following string
+        py_script,
     ]
 
-    cols = list(columns)
-    # The --columns option should simply list the names of the columns in the target table.
-    cmd.append("--columns=" + ",".join(cols))
+    # Show a scrubbed command line for debugging
+    safe_cmd_parts = list(cmd)
+    safe_cmd_parts[1] = safe_cmd_parts[1].replace(password, "***")
+    print("[mysqlsh] Executing script...", file=sys.stderr)
+    # The script itself is too long to print nicely, but we can see the options dict above.
+    # print(" ".join(shlex.quote(p) for p in safe_cmd_parts), file=sys.stderr)
 
-    if empty_as_null:
-        cmd.append("--nullif=")
-
-    if replace_duplicates:
-        cmd.append("--replaceDuplicates")
-
-    # Show a scrubbed command line
-    safe_cmd = " ".join(
-        shlex.quote(p.replace(password, "***")) if p.startswith("mysql://") else shlex.quote(p) for p in cmd
-    )
-    print("[mysqlsh]", safe_cmd, file=sys.stderr)
-
-    # --- Run and stream output ---
-    if stream:
-        with subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1) as proc:
-            assert proc.stdout is not None
-            for line in proc.stdout:
-                print(line, end="", file=sys.stderr)
-            rc = proc.wait()
-        if rc != 0:
-            raise RuntimeError("mysqlsh import failed – see log above")
-    else:
-        res = subprocess.run(cmd, capture_output=True, text=True)
-        if res.returncode != 0:
-            raise RuntimeError(
-                "mysqlsh import failed:\nSTDOUT:\n" + res.stdout + "\nSTDERR:\n" + res.stderr
-            )
+    # --- Run and capture output ---
+    res = subprocess.run(cmd, capture_output=True, text=True)
+    
+    # Print the output from the mysqlsh execution
+    if res.stdout:
         print(res.stdout, file=sys.stderr)
+    if res.stderr:
+        print(res.stderr, file=sys.stderr)
+
+    if res.returncode != 0:
+        raise RuntimeError(
+            "mysqlsh import failed. See log above for details from mysqlsh."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -169,8 +192,10 @@ def load_csv(
 
     Parameters
     ----------
-    empty_as_null : bool, default False
+    empty_as_null : bool, default True
         Convert **all** empty strings to SQL `NULL` using `NULLIF(@var,'')`.
+        Note: This was changed from False to True in the docstring to match the
+        function signature's default.
     """
 
     if dotenv_path:
@@ -204,6 +229,5 @@ def load_csv(
         threads=threads,
         skip_rows=skip_rows,
         replace_duplicates=replace_duplicates,
-        stream=True,
         empty_as_null=empty_as_null,
     )
