@@ -2,32 +2,37 @@ from __future__ import annotations
 
 import csv
 import os
-import re
 import subprocess
 import sys
+import tempfile
 import time
 from collections import OrderedDict
 from pathlib import Path
 from typing import Mapping
 
-import pyarrow as pa
-import pyarrow.compute as pc
-import pyarrow.csv as pacsv
 import sqlalchemy as sa
 from dotenv import find_dotenv, load_dotenv
 
-# ── .env handling ─────────────────────────────────────────────────────────────
-dotenv = find_dotenv(usecwd=True)
-if dotenv:
-    load_dotenv(dotenv, override=False)
-else:
-    sys.stderr.write(
-        "[load_csv] WARNING: .env not found; expecting DB_* vars in env.\n"
-    )
+try:
+    import pyarrow.csv as pacsv
+    import pyarrow as pa
+except ModuleNotFoundError as exc:  # Arrow is mandatory
+    raise ImportError(
+        "pyarrow >= 14 is required for load_csv(). "
+        "Install with:  pip install pyarrow"
+    ) from exc
+
+
+# ── environment ───────────────────────────────────────────────────────────────
+dotenv_path = find_dotenv(usecwd=True)
+if dotenv_path:
+    load_dotenv(dotenv_path, override=False)
 
 DEFAULT_DB_PORT = int(os.getenv("DB_PORT", "3306"))
 
-# ── INT size map (same as MySQL) ──────────────────────────────────────────────
+# ── constants ────────────────────────────────────────────────────────────────
+_PROGRESS_EVERY = 500_000  # rows between console prints during cleaning
+
 _INT_LIMITS = [
     ("TINYINT",   -128,                     127,                    255),
     ("SMALLINT",  -32768,                   32767,                  65535),
@@ -36,146 +41,17 @@ _INT_LIMITS = [
     ("BIGINT",    -9223372036854775808,     9223372036854775807,    18446744073709551615),
 ]
 
-# ── Column stats container ────────────────────────────────────────────────────
-class ColStats:
-    __slots__ = (
-        "max_len", "has_lz", "all_int", "all_num",
-        "min_int", "max_int", "max_scale",
-    )
 
-    def __init__(self) -> None:
-        self.max_len  = 0
-        self.has_lz   = False
-        self.all_int  = True   # only digits +/-?
-        self.all_num  = True   # int or dec
-        self.min_int  = 0
-        self.max_int  = 0
-        self.max_scale= 0      # decimal places
-
-    # update with an Arrow STRING array (no nulls)
-    def update(self, arr: pa.Array) -> None:
-        if arr.null_count == len(arr):
-            return
-
-        # max length
-        self.max_len = max(
-            self.max_len,
-            pc.max(pc.utf8_length(arr)).as_py()
-        )
-
-        # leading-zero flag
-        lz_mask = pc.and_(
-            pc.greater(pc.utf8_length(arr), 1),
-            pc.equal(pc.substr(arr, 0, 1), pa.scalar("0")),
-        )
-        if pc.any(lz_mask).as_py():
-            self.has_lz = True
-
-        # digit / decimal regex masks
-        int_mask = pc.match_substring_regex(arr, r"^[+-]?\d+$")
-        dec_mask = pc.match_substring_regex(arr, r"^[+-]?\d+\.\d+$")
-
-        if not pc.all(pc.or_(int_mask, lz_mask)).as_py():
-            self.all_int = False
-        if not pc.all(pc.or_(int_mask, dec_mask)).as_py():
-            self.all_num = False
-
-        if self.all_int:
-            ints = pc.cast(arr, pa.int64(), safe=False)
-            mn = pc.min(ints).as_py()
-            mx = pc.max(ints).as_py()
-            if self.min_int == self.max_int == 0:
-                self.min_int, self.max_int = mn, mx
-            else:
-                self.min_int = min(self.min_int, mn)
-                self.max_int = max(self.max_int, mx)
-
-        if self.all_num and dec_mask.null_count != len(dec_mask):
-            scale = pc.max(pc.utf8_length(pc.substr(arr, pc.index(arr, pc.find_substring(arr, ".")) + 1))).as_py()  # type: ignore
-            self.max_scale = max(self.max_scale, scale)
-
-# ── Arrow-based inference (streaming) ─────────────────────────────────────────
-def _infer_column_types(path: Path, *, header: bool, delimiter: str=",") -> OrderedDict[str, str]:
-    print("[infer] PyArrow streaming scan …")
-    t0 = time.perf_counter()
-
-    # figure out column names (needed for column_types mapping)
-    with open(path, newline="", encoding="utf-8") as f:
-        first_line = f.readline().rstrip("\n")
-
-    if header:
-        col_names = next(csv.reader([first_line]))
-        skip_rows = 1
-    else:
-        col_count = len(next(csv.reader([first_line])))
-        col_names = [f"col{i+1}" for i in range(col_count)]
-        skip_rows = 0
-
-    arrow_types = {name: pa.string() for name in col_names}
-
-    reader = pacsv.open_csv(
-        path,
-        read_options=pacsv.ReadOptions(
-            autogenerate_column_names=not header,
-            skip_rows=skip_rows,
-            block_size=1 << 20,          # 1 MiB batches ⇒ low RAM
-        ),
-        parse_options=pacsv.ParseOptions(delimiter=delimiter),
-        convert_options=pacsv.ConvertOptions(
-            column_types=arrow_types,
-            null_values=["", "nan", "NaN", "NULL"],
-        ),
-    )
-
-    stats = {name: ColStats() for name in col_names}
-    total = 0
-    for batch in reader:
-        total += batch.num_rows
-        for i, name in enumerate(col_names):
-            col = batch.column(i).drop_null()
-            if len(col):
-                stats[name].update(col)
-
-    print(f"[infer] Done – analysed {total:,} rows in {time.perf_counter()-t0:.1f}s")
-
-    # map stats → MySQL types
-    types: OrderedDict[str, str] = OrderedDict()
-    for name, s in stats.items():
-        if s.has_lz:
-            types[name] = f"CHAR({s.max_len})"
-            continue
-
-        if s.all_int and s.max_len <= 20:
-            unsigned = s.min_int >= 0
-            for sql, lo, hi, uhi in _INT_LIMITS:
-                if unsigned and s.max_int <= uhi:
-                    types[name] = f"{sql} UNSIGNED"
-                    break
-                if not unsigned and lo <= s.min_int and s.max_int <= hi:
-                    types[name] = sql
-                    break
-            else:
-                types[name] = f"VARCHAR({s.max_len})"
-            continue
-
-        if s.all_num:
-            prec = len(str(abs(s.max_int))) + s.max_scale
-            types[name] = f"DECIMAL({prec},{s.max_scale})" if prec <= 38 else "DOUBLE"
-            continue
-
-        types[name] = "TEXT" if s.max_len > 255 else f"VARCHAR({s.max_len})"
-
-    return types, col_names, skip_rows
-
-# ── SQL helpers ───────────────────────────────────────────────────────────────
-def _q(x: str) -> str:
-    if "`" in x:
+# ── helpers ───────────────────────────────────────────────────────────────────
+def _q(ident: str) -> str:
+    if "`" in ident:
         raise ValueError("back-tick in identifier")
-    return f"`{x}`"
+    return f"`{ident}`"
 
-def _eng(host: str, port: int) -> sa.engine.Engine:
+
+def _sqlalchemy_engine(host: str, port: int) -> sa.engine.Engine:
     url = sa.engine.url.URL.create(
-        "mysql+pymysql",
+        drivername="mysql+pymysql",
         username=os.getenv("DB_USER"),
         password=os.getenv("DB_PASS"),
         host=host,
@@ -184,33 +60,147 @@ def _eng(host: str, port: int) -> sa.engine.Engine:
     )
     return sa.create_engine(url, pool_pre_ping=True, pool_recycle=1800)
 
-def _create_table(host: str, port: int, schema: str, table: str,
-                  col_types: Mapping[str, str]) -> None:
-    cols_sql = ",\n  ".join(f"{_q(c)} {t}" for c, t in col_types.items())
-    ddl = f"CREATE TABLE IF NOT EXISTS {_q(schema)}.{_q(table)} (\n  {cols_sql}\n) ENGINE=InnoDB;"
-    with _eng(host, port).begin() as conn:
+
+def _clean_inplace(src: Path) -> None:
+    """
+    Replace *src* atomically by a version where '', NaN, NULL → \\N.
+    """
+    print(f"[clean] Overwriting {src.name} …")
+    t0 = time.perf_counter()
+
+    fd, tmp_name = tempfile.mkstemp(suffix=".csv", prefix="tmp_", dir=src.parent)
+    os.close(fd)
+    tmp_path = Path(tmp_name)
+
+    with (
+        open(src, newline="", encoding="utf-8") as fin,
+        open(tmp_path, "w", newline="", encoding="utf-8") as fout,
+    ):
+        reader = csv.reader(fin)
+        writer = csv.writer(fout, lineterminator="\n", quoting=csv.QUOTE_MINIMAL)
+
+        for i, row in enumerate(reader, 1):
+            writer.writerow(
+                [
+                    r"\N" if cell.strip() in {"", "nan", "NaN", "NULL"} else cell
+                    for cell in row
+                ]
+            )
+            if _PROGRESS_EVERY and i % _PROGRESS_EVERY == 0:
+                print(f"[clean]   … {i:,} rows rewritten")
+
+    os.replace(tmp_path, src)
+    print(f"[clean] Done in {time.perf_counter() - t0:.1f} s")
+
+
+def _infer_with_arrow(
+    path: Path,
+    *,
+    header: bool,
+    delimiter: str = ",",
+) -> OrderedDict[str, str]:
+    """
+    Use PyArrow to scan the cleaned CSV and map Arrow types → MySQL types.
+    """
+    print("[infer] PyArrow schema inference …")
+    t0 = time.perf_counter()
+
+    tbl = pacsv.read_csv(
+        path,
+        read_options=pacsv.ReadOptions(
+            autogenerate_column_names=not header,
+            skip_rows=1 if header else 0,
+        ),
+        parse_options=pacsv.ParseOptions(delimiter=delimiter),
+    )
+
+    col_types: OrderedDict[str, str] = OrderedDict()
+    for name, col in zip(tbl.schema.names, tbl.columns, strict=True):
+        pa_t = col.type
+
+        if pa.types.is_boolean(pa_t):
+            col_types[name] = "TINYINT UNSIGNED"
+
+        elif pa.types.is_integer(pa_t):
+            bits = pa_t.bit_width
+            signed = pa_t.is_signed
+            mysql = {8: "TINYINT", 16: "SMALLINT",
+                     32: "INT", 64: "BIGINT"}[bits]
+            col_types[name] = mysql if signed else f"{mysql} UNSIGNED"
+
+        elif pa.types.is_floating(pa_t):
+            col_types[name] = "DOUBLE"
+
+        elif pa.types.is_decimal(pa_t):
+            p = pa_t.precision
+            s = pa_t.scale
+            col_types[name] = f"DECIMAL({p},{s})" if p <= 38 else "DOUBLE"
+
+        else:  # string, binary, etc.
+            # Find max length quickly via compute kernel
+            max_len = pa.compute.max(pa.compute.utf8_length(col)).as_py()
+            col_types[name] = (
+                "TEXT" if max_len > 255 else f"VARCHAR({max_len})"
+            )
+
+    print(f"[infer] Finished in {time.perf_counter() - t0:.1f} s "
+          f"({len(col_types)} columns)")
+    return col_types
+
+
+def _create_table(
+    *,
+    host: str,
+    port: int,
+    schema: str,
+    table: str,
+    col_types: Mapping[str, str],
+) -> None:
+    ddl_cols = ",\n  ".join(f"{_q(c)} {t}" for c, t in col_types.items())
+    ddl = (
+        f"CREATE TABLE IF NOT EXISTS {_q(schema)}.{_q(table)} (\n  "
+        f"{ddl_cols}\n) ENGINE=InnoDB;"
+    )
+    with _sqlalchemy_engine(host, port).begin() as conn:
         conn.execute(sa.text(f"CREATE DATABASE IF NOT EXISTS {_q(schema)};"))
         conn.execute(sa.text(ddl))
 
-def _mysqlsh_import(path: Path, *, host: str, port:int, schema:str,
-                    table:str, cols:list[str], dialect:str,
-                    threads:int, skip:int, dup:bool) -> None:
-    user, pw = os.getenv("DB_USER"), os.getenv("DB_PASS")
-    uri = f"mysql://{user}:{pw}@{host}:{port}"
+
+def _mysqlsh_import(
+    path: Path,
+    *,
+    host: str,
+    port: int,
+    schema: str,
+    table: str,
+    columns: list[str],
+    dialect: str,
+    threads: int,
+    skip_rows: int,
+    replace_duplicates: bool,
+) -> None:
+    uri = f"mysql://{os.getenv('DB_USER')}:{os.getenv('DB_PASS')}@{host}:{port}"
     cmd = [
-        "mysqlsh", uri, "--", "util", "import-table", str(path),
-        f"--schema={schema}", f"--table={table}",
-        f"--columns={','.join(cols)}",
-        f"--dialect={dialect}", f"--threads={threads}",
-        f"--skipRows={skip}",
-        "--nullValue=''",          # tell mysqlsh to treat '' as NULL
-        "--showProgress=true",
+        "mysqlsh",
+        uri,
+        "--",
+        "util",
+        "import-table",
+        str(path),
+        f"--schema={schema}",
+        f"--table={table}",
+        f"--columns={','.join(columns)}",
+        f"--dialect={dialect}",
+        f"--threads={threads}",
+        f"--skipRows={skip_rows}",
+        "--showProgress=true",  # built-in progress bar
     ]
-    if dup:
+    if replace_duplicates:
         cmd.append("--onDuplicateKeyUpdate")
     subprocess.run(cmd, check=True)
 
-# ── Public API ────────────────────────────────────────────────────────────────
+
+# ── public API ────────────────────────────────────────────────────────────────
 def load_csv(
     *,
     csv_path: str | Path,
@@ -218,44 +208,67 @@ def load_csv(
     schema: str | None = None,
     host: str | None = None,
     port: int | None = None,
-    col_types: Mapping[str, str] | None = None,
     header: bool = True,
     dialect: str = "csv-unix",
     threads: int = 8,
     replace_duplicates: bool = False,
 ) -> None:
     """
-    Bulk-load *csv_path* into MySQL using **PyArrow-only** schema inference.
+    Clean a large CSV **in-place**, infer column types with PyArrow, and bulk-load
+    it into MySQL using MySQL Shell’s parallel importer.
 
     Parameters
     ----------
+    csv_path : path-like
+        The CSV file to import (will be overwritten with a cleaned copy ⚠).
+    table : str
+        Destination table name.
     header : bool, default True
-        True → first row contains column names.  
-        False → file has no header; names generated col1…colN.
+        True  → first row holds column names.  
+        False → no header; columns auto-named col1, col2, …
+    replace_duplicates : bool
+        If True, pass `--onDuplicateKeyUpdate` to mysqlsh.
     """
     src = Path(csv_path).expanduser()
     if not src.exists():
         raise FileNotFoundError(src)
 
     schema = schema or os.getenv("DB_NAME")
-    host   = host   or os.getenv("DB_HOST")
-    port   = port   or DEFAULT_DB_PORT
+    host = host or os.getenv("DB_HOST")
+    port = port or DEFAULT_DB_PORT
     if not schema or not host:
-        raise RuntimeError("DB_HOST and DB_NAME must be set (env or arg)")
+        raise RuntimeError("DB_HOST and DB_NAME must be set (env or argument)")
 
-    inferred_types, col_names, skip = _infer_column_types(src, header=header)
-    if col_types:
-        inferred_types.update(col_types)   # user override
+    # 1 · Clean (in-place)
+    _clean_inplace(src)
 
-    _create_table(host, port, schema, table, inferred_types)
+    # 2 · Infer types (PyArrow)
+    col_types = _infer_with_arrow(src, header=header)
 
-    _mysqlsh_import(
-        src, host=host, port=port,
-        schema=schema, table=table,
-        cols=list(inferred_types.keys()),
-        dialect=dialect, threads=threads,
-        skip=skip, dup=replace_duplicates,
+    # 3 · Create table if missing
+    _create_table(
+        host=host,
+        port=port,
+        schema=schema,
+        table=table,
+        col_types=col_types,
     )
 
-    print(f"[load_csv] Imported {src.name} → {schema}.{table} "
-          f"({len(inferred_types)} columns)")
+    # 4 · Import via mysqlsh
+    _mysqlsh_import(
+        src,
+        host=host,
+        port=port,
+        schema=schema,
+        table=table,
+        columns=list(col_types.keys()),
+        dialect=dialect,
+        threads=threads,
+        skip_rows=1 if header else 0,
+        replace_duplicates=replace_duplicates,
+    )
+
+    print(
+        f"[load_csv] Imported {src.name} → {schema}.{table} "
+        f"({len(col_types)} columns)"
+    )
