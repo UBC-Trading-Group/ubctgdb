@@ -9,8 +9,6 @@
 | `upload_dataframe()` | Same as `upload_csv`, but starts from a `pandas` DataFrame. |
 | `append_csv()` / `append_dataframe()` | Efficient *append-only* (or “upsert”) loader—skips rows already in the destination table. |
 
-Additional niceties:
-
 * Connection pooling via **SQLAlchemy** to avoid reconnect overhead.
 * **DiskCache** on-disk DataFrame cache keyed by query hash.
 * Shared *null* convention: the sentinel string `\N` becomes Python `NaN`/**`pd.NA`** and SQL `NULL` automatically.
@@ -31,14 +29,12 @@ Additional niceties:
 ## Installation
 
 ```bash
-# 1️⃣  macOS / Linux — make sure MySQL client libs are present
+# 1) macOS / Linux — make sure MySQL client libs are present
 # macOS example:
 brew install mysql
 
-# 2️⃣  Install the package (PyPI or GitHub)
+# 2️) Install the package 
 pip install git+https://github.com/UBC-Trading-Group/ubctgdb.git
-#  – or –
-pip install ubctgdb        # when published on PyPI
 ````
 
 ---

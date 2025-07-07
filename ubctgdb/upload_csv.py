@@ -34,7 +34,6 @@ DEFAULT_DB_PORT = int(os.getenv("DB_PORT", "3306"))
 _NULLS = {x.lower() for x in NULL_MARKERS}
 
 def _clean_inplace(src: Path) -> None:
-    """Overwrite *src* replacing empty/NULL markers with ``\N``."""
     print(f"[clean] Overwriting {src.name} …")
     t0 = time.perf_counter()
     fd, tmp = tempfile.mkstemp(suffix=".csv", dir=src.parent, prefix="tmp_")
@@ -170,13 +169,7 @@ def upload_csv(
     clean: bool = True,
     replace_table: bool = False,
 ) -> None:
-    """
-    Bulk-load *csv_path* into MySQL using MySQL Shell (fast).
 
-    Missing values are normalised to ``\\N`` so that:
-    • pandas/Arrow see NaN / pd.NA (we register the token in _infer_schema)
-    • MySQL util.importTable() sees SQL NULL.
-    """
     src = Path(csv_path).expanduser()
     if not src.exists():
         raise FileNotFoundError(src)
