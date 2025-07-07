@@ -119,7 +119,7 @@ def _run_mysqlsh_import(
         col_spec_parts: List[str] = []
         for c in cols:
             col_spec_parts.append(f"@{c}")
-            col_spec_parts.append(f"{c}=NULLIF(@{c},'')")
+            col_spec_parts.append(f'{c}=NULLIF(@{c},"")')
         cmd.append("--columns=" + ",".join(col_spec_parts))
     else:
         cmd.append("--columns=" + ",".join(cols))
