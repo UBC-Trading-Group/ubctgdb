@@ -114,15 +114,11 @@ def _run_mysqlsh_import(
     ]
 
     cols = list(columns)
+    # The --columns option should simply list the names of the columns in the target table.
+    cmd.append("--columns=" + ",".join(cols))
+
     if empty_as_null:
-        # For each field produce a user variable then set column = NULLIF(@var,'')
-        col_spec_parts: List[str] = []
-        for c in cols:
-            col_spec_parts.append(f"@{c}")
-            col_spec_parts.append(f'{c}=NULLIF(@{c},"")')
-        cmd.append("--columns=" + ",".join(col_spec_parts))
-    else:
-        cmd.append("--columns=" + ",".join(cols))
+        cmd.append("--nullif=")
 
     if replace_duplicates:
         cmd.append("--replaceDuplicates")
