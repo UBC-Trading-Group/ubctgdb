@@ -15,7 +15,7 @@ from dotenv import find_dotenv, load_dotenv
 load_dotenv(find_dotenv(usecwd=True), override=False)
 
 # ── public constants ─────────────────────────────────────────────────────
-NULL_TOKEN: str = r"\N"                     # recognised by MySQL *and* PyArrow
+NULL_TOKEN: str = r"\N"                    
 NULL_MARKERS: set[str] = {"", "na", "n/a", "nan", "null"}
 PROGRESS_EVERY: int = 500_000               # rows between progress prints
 
@@ -46,7 +46,7 @@ def sqlalchemy_engine(
         password=os.getenv("DB_PASS"),
         host=host or os.getenv("DB_HOST"),
         port=port or int(os.getenv("DB_PORT", "3306")),
-        database=database or os.getenv("DB_NAME"), # <-- CORRECTED LINE
+        database=database or os.getenv("DB_NAME"), 
     )
     return sa.create_engine(
         url,

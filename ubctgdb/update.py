@@ -71,7 +71,6 @@ def _append_staging(csv_path, table, key_cols, schema, host, port, **upload_csv_
         insp = sa.inspect(conn)
         all_cols = [c["name"] for c in insp.get_columns(stage, schema=schema)]
         
-        # CORRECTED: Prefix all columns with `s.` to resolve ambiguity.
         cols_to_insert = ", ".join(_q(c) for c in all_cols)
         cols_to_select = ", ".join(f"s.{_q(c)}" for c in all_cols)
         
@@ -144,7 +143,7 @@ def append_dataframe(df: pd.DataFrame, **kw) -> None:
     ) as tmp:
         path = Path(tmp.name)
         df.to_csv(path, index=False, na_rep=NULL_TOKEN)
-        # We need to close the file handle before append_csv opens it
+        # close the file handle before append_csv opens it
     
     try:
         append_csv(csv_path=path, **kw)
