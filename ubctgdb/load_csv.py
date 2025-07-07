@@ -108,17 +108,11 @@ def _run_mysqlsh_import(
 
     cols = list(columns)
     if empty_as_null:
-        # 1. Read CSV data into user variables via the 'columns' option.
-        options["columns"] = [f"@{c}" for c in cols]
-
-        # 2. Map each table column to an expression that NULL-ifies empty strings
-        #    (and the common string "NaN") after trimming whitespace.
-        column_opts = {}
-        for c in cols:
-            column_opts[c] = {
-                "expression": f"NULLIF(NULLIF(TRIM(@{c}), ''), 'NaN')"
-            }
-        options["columnOptions"] = column_opts
+        col_vars   = [f"@{c}" for c in cols]
+        col_assign = [
+            f"{c}=NULLIF(NULLIF(TRIM(@{c}), ''), 'NaN')" for c in cols
+        ]
+        options["columns"] = col_vars + col_assign
     else:
         # Simple case: map CSV columns directly to table columns.
         options["columns"] = cols
