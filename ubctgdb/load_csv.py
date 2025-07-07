@@ -47,10 +47,6 @@ def _sqlalchemy_engine(host: str, port: int) -> sa.engine.Engine:
 
 
 def _clean_inplace(src: Path) -> None:
-    """
-    Atomically overwrite *src* so that '', NaN, NULL → \N
-    (MySQL’s NULL sentinel for LOAD DATA / mysqlsh import-table).
-    """
     print(f"[clean] Overwriting {src.name} …")
     t0 = time.perf_counter()
 
@@ -188,25 +184,9 @@ def load_csv(
     dialect: str = "csv-unix",
     threads: int = 8,
     replace_duplicates: bool = False,
-    clean: bool = True,                     # ← NEW FLAG
+    clean: bool = True,                   
 ) -> None:
-    """
-    Import a (large) CSV into MySQL via MySQL-Shell’s parallel importer.
-
-    Steps:
-      1. **Optionally** clean the CSV in-place (''/NaN/NULL → \N).
-      2. Infer column types with PyArrow.
-      3. Create the destination table if needed.
-      4. Bulk-load with `mysqlsh util import-table`.
-
-    Parameters
-    ----------
-    csv_path : str | Path
-        Path to the CSV file (will be overwritten if `clean=True`).
-    clean : bool, default True
-        If False, skip step 1 (useful if the file is already in MySQL-friendly
-        form or you need maximum speed).
-    """
+    
     src = Path(csv_path).expanduser()
     if not src.exists():
         raise FileNotFoundError(src)
