@@ -38,7 +38,7 @@ def sqlalchemy_engine(
 ) -> sa.Engine:
     """
     Build a plain SQLAlchemy *Engine* using either explicit parameters
-    or `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASS` from the environment.
+    or `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASS`, and `DB_NAME` from the environment.
     """
     url = sa.engine.url.URL.create(
         drivername="mysql+mysqldb",
@@ -46,7 +46,7 @@ def sqlalchemy_engine(
         password=os.getenv("DB_PASS"),
         host=host or os.getenv("DB_HOST"),
         port=port or int(os.getenv("DB_PORT", "3306")),
-        database=database,
+        database=database or os.getenv("DB_NAME"), # <-- CORRECTED LINE
     )
     return sa.create_engine(
         url,
@@ -79,6 +79,7 @@ def run_sql(
     """
     Execute *sql* and return a DataFrame, streaming in *chunksize* pieces
     to limit memory spikes.  Results persist in an on-disk cache for 24 h.
+    The database/schema from the `DB_NAME` environment variable is used by default.
     """
     key = _cache_key(sql)
     if not refresh and key in _CACHE:
