@@ -37,10 +37,6 @@ DB_PORT = int(os.getenv("DB_PORT", 3306))
 
 
 def _clean_csv_to_temp(src_path: Path) -> Path:
-    """
-    Stream *src_path* and write a temp CSV where every empty cell or
-    literal 'NaN' becomes the NULL token '\N'.  Returns the temp path.
-    """
     fd, tmp_name = tempfile.mkstemp(
         suffix=".csv", prefix="clean_", dir=src_path.parent
     )
