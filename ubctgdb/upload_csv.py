@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import csv
@@ -99,7 +98,8 @@ def _infer_schema(path: Path, *, header: bool) -> OrderedDict[str, str]:
             out[name] = "DATETIME"
         elif pa.types.is_string(t) or pa.types.is_binary(t):
             max_len = pa.compute.max(pa.compute.utf8_length(col)).as_py() or 0
-            out[name] = "TEXT" if max_len > 255 else f"VARCHAR({max_len})"
+            # Ensure VARCHAR length is at least 1 to avoid invalid DDL
+            out[name] = "TEXT" if max_len > 255 else f"VARCHAR({max(1, max_len)})"
         else:
             out[name] = "TEXT"
     print(f"[infer] Done in {time.perf_counter() - t0:.1f} s ({len(out)} cols)")
@@ -141,7 +141,7 @@ def _mysqlsh(
     skip_rows: int, replace_dup: bool
 ) -> None:
     if not shutil.which("mysqlsh"):
-        raise RuntimeError("mysqlsh not found")
+        raise RuntimeError("mysqlsh not found in PATH. Please install MySQL Shell.")
     uri = f"mysql://{os.getenv('DB_USER')}:{os.getenv('DB_PASS')}@{host}:{port}"
     cmd = [
         "mysqlsh", uri, "--", "util", "import-table", str(path),
@@ -162,7 +162,7 @@ def upload_csv(
     schema: str | None = None,
     host: str | None = None,
     port: int | None = None,
-    header: bool | None = None,       
+    header: bool | None = None,
     dialect: str = "csv-unix",
     threads: int = 8,
     replace_duplicates: bool = False,
@@ -178,7 +178,7 @@ def upload_csv(
     host   = host   or os.getenv("DB_HOST")
     port   = port   or DEFAULT_DB_PORT
     if not schema or not host:
-        raise RuntimeError("DB_HOST and DB_NAME must be set")
+        raise RuntimeError("DB_HOST and DB_NAME must be set in the environment or passed as arguments.")
 
     if clean:
         _clean_inplace(src)
