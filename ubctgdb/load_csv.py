@@ -1,10 +1,10 @@
 from __future__ import annotations
 
+import csv
 import os
 import re
-import sys
-import csv
 import subprocess
+import sys
 import tempfile
 from collections import OrderedDict
 from pathlib import Path
@@ -14,28 +14,32 @@ import pandas as pd
 import sqlalchemy as sa
 from dotenv import find_dotenv, load_dotenv
 
-# ---------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 #  Environment
-# ---------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+dotenv_path = find_dotenv(usecwd=True)  # <-- CRITICAL CHANGE
+if dotenv_path:
+    load_dotenv(dotenv_path, override=False)
+else:
+    sys.stderr.write(
+        "[load_csv] WARNING: .env not found via find_dotenv(); expecting "
+        "DB_* variables in the process environment.\n"
+    )
 
-# Load variables from a .env in the cwd (or a parent); keep any that are
-# already set in the process environment.
-load_dotenv(find_dotenv())
-DEFAULT_DB_PORT = 3306
+DEFAULT_DB_PORT = int(os.getenv("DB_PORT", "3306"))
 
-# ---------------------------------------------------------------------------
-#  CSV pre-cleaner (streaming – O(1) memory)
-# ---------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+#  CSV pre-cleaner  (streaming – O(1) memory)
+# -----------------------------------------------------------------------------
 
 
 def _clean_csv_to_temp(src_path: Path) -> Path:
     fd, tmp_name = tempfile.mkstemp(
         suffix=".csv", prefix="clean_", dir=src_path.parent
     )
-    os.close(fd)  # close the descriptor; we’ll reopen with csv module
+    os.close(fd)
 
     tmp_path = Path(tmp_name)
-
     with (
         open(src_path, newline="", encoding="utf-8") as fin,
         open(tmp_path, "w", newline="", encoding="utf-8") as fout,
@@ -46,9 +50,7 @@ def _clean_csv_to_temp(src_path: Path) -> Path:
         for row in reader:
             writer.writerow(
                 [
-                    r"\N"
-                    if (cell.strip() == "" or cell.strip().lower() == "nan")
-                    else cell
+                    r"\N" if cell.strip() in {"", "nan", "NaN", "NULL"} else cell
                     for cell in row
                 ]
             )
@@ -56,9 +58,138 @@ def _clean_csv_to_temp(src_path: Path) -> Path:
     return tmp_path
 
 
-# ---------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+#  Datatype inference  (streaming)
+# -----------------------------------------------------------------------------
+
+
+_INT_LIMITS = [
+    ("TINYINT", -128, 127, 255),
+    ("SMALLINT", -32768, 32767, 65535),
+    ("MEDIUMINT", -8388608, 8388607, 16777215),
+    ("INT", -2147483648, 2147483647, 4294967295),
+    ("BIGINT", -9223372036854775808, 9223372036854775807, 18446744073709551615),
+]
+
+
+def _infer_column_types(csv_path: Path, delimiter: str = ",") -> OrderedDict[str, str]:
+    meta = None  # will become list[dict] once header known
+
+    date_re = re.compile(r"\d{4}-\d{2}-\d{2}$")
+    with open(csv_path, newline="", encoding="utf-8") as f:
+        reader = csv.reader(f, delimiter=delimiter)
+        header = next(reader)
+        meta = [
+            {
+                "max_len": 0,
+                "has_lz": False,
+                "is_int": True,
+                "is_decimal": True,
+                "min_int": 0,
+                "max_int": 0,
+                "max_scale": 0,
+            }
+            for _ in header
+        ]
+
+        for row in reader:
+            for idx, cell in enumerate(row):
+                if cell in {"", r"\N"}:
+                    # treat NULL as no-info
+                    continue
+
+                m = meta[idx]
+                m["max_len"] = max(m["max_len"], len(cell))
+
+                # leading zero?
+                if len(cell) > 1 and cell[0] == "0":
+                    m["has_lz"] = True
+
+                # quick date check (YYYY-MM-DD)
+                # defer – we’ll tag as DATE later
+
+                # numeric analysis
+                if m["is_int"] or m["is_decimal"]:
+                    if cell.isdigit():
+                        # integer, possibly large
+                        val = int(cell)
+                        if m["is_int"]:
+                            if m["min_int"] == m["max_int"] == 0:
+                                m["min_int"] = m["max_int"] = val
+                            else:
+                                m["min_int"] = min(m["min_int"], val)
+                                m["max_int"] = max(m["max_int"], val)
+                    else:
+                        # could be decimal?
+                        try:
+                            # split mantissa.scale ourselves to keep precision
+                            if "." in cell:
+                                left, right = cell.split(".", 1)
+                                if left.lstrip("+-").isdigit() and right.isdigit():
+                                    m["max_scale"] = max(m["max_scale"], len(right))
+                                    m["is_int"] = False
+                                    val_int = int(left or "0")
+                                    m["min_int"] = min(m["min_int"], val_int)
+                                    m["max_int"] = max(m["max_int"], val_int)
+                                else:
+                                    m["is_int"] = m["is_decimal"] = False
+                            else:
+                                m["is_int"] = m["is_decimal"] = False
+                        except Exception:
+                            m["is_int"] = m["is_decimal"] = False
+
+    col_types: OrderedDict[str, str] = OrderedDict()
+
+    for col, m in zip(header, meta):
+        # DATE first
+        sample_len = m["max_len"]
+        if sample_len == 10 and m["is_int"] is False and date_re.match("0" * 10):
+            # This rough check alone isn't enough; do a cheap final test on header row value
+            col_types[col] = "DATE"
+            continue
+
+        # keep leading zeroes?
+        if m["has_lz"]:
+            col_types[col] = f"CHAR({sample_len})"
+            continue
+
+        # integers?
+        if m["is_int"] and sample_len <= 20:
+            signed_ok = False
+            unsigned_ok = m["min_int"] >= 0
+            for name, lo, hi, uhi in _INT_LIMITS:
+                if unsigned_ok and m["max_int"] <= uhi:
+                    col_types[col] = f"{name} UNSIGNED"
+                    signed_ok = True
+                    break
+                if not unsigned_ok and lo <= m["min_int"] and m["max_int"] <= hi:
+                    col_types[col] = name
+                    signed_ok = True
+                    break
+            if signed_ok:
+                continue
+
+        # decimals?
+        if m["is_decimal"]:
+            precision = len(str(m["max_int"])) + m["max_scale"]
+            if precision <= 38:  # MySQL DECIMAL max is 65, but 38 keeps it portable
+                col_types[col] = f"DECIMAL({precision},{m['max_scale']})"
+            else:
+                col_types[col] = "DOUBLE"
+            continue
+
+        # fallback – string
+        if sample_len > 255:
+            col_types[col] = "TEXT"
+        else:
+            col_types[col] = f"VARCHAR({sample_len})"
+
+    return col_types
+
+
+# -----------------------------------------------------------------------------
 #  SQL helpers
-# ---------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 
 
 def _sqlalchemy_engine(host: str, port: int) -> sa.engine.Engine:
@@ -68,13 +199,14 @@ def _sqlalchemy_engine(host: str, port: int) -> sa.engine.Engine:
         password=os.getenv("DB_PASS"),
         host=host,
         port=port,
+        database=None,
     )
     return sa.create_engine(url, pool_pre_ping=True, pool_recycle=1800)
 
 
-def _q(name: str) -> str:  # quote identifier
+def _q(name: str) -> str:  # quote identifier safely
     if "`" in name:
-        raise ValueError("Back-tick in identifier: %s" % name)
+        raise ValueError(f"Back-tick in identifier: {name}")
     return f"`{name}`"
 
 
@@ -113,90 +245,74 @@ def _run_mysqlsh_import(
     password = os.getenv("DB_PASS")
 
     uri = f"mysql://{user}:{password}@{host}:{port}"
-
-    options = {
-        "schema": schema,
-        "table": table,
-        "dialect": dialect,
-        "threads": threads,
-        "skipRows": skip_rows,
-        "replaceDuplicates": replace_duplicates,
-        "columns": columns,  # 1-to-1 mapping
-    }
-
-    py_script = f"""
-import util
-util.import_table(
-    {str(csv_path)!r},
-    {options!r},
-)
-"""
-
-    cmd = ["mysqlsh", uri, "--py", "-e", py_script]
-
-    # scrub password for debug echo
-    if password:
-        cmd[1] = cmd[1].replace(password, "***")
-    print("[mysqlsh] Executing script…", file=sys.stderr)
-
-    res = subprocess.run(cmd, capture_output=True, text=True)
-
-    if res.stdout:
-        print(res.stdout, file=sys.stderr)
-    if res.stderr:
-        print(res.stderr, file=sys.stderr)
-
-    if res.returncode != 0:
-        raise RuntimeError("mysqlsh import failed.  See messages above.")
+    cmd = [
+        "mysqlsh",
+        uri,
+        "--",
+        "util",
+        "import-table",
+        str(csv_path),
+        f"--schema={schema}",
+        f"--table={table}",
+        f"--columns={','.join(columns)}",
+        f"--dialect={dialect}",
+        f"--threads={threads}",
+        f"--skipRows={skip_rows}",
+    ]
+    if replace_duplicates:
+        cmd.append("--onDuplicateKeyUpdate")
+    subprocess.run(cmd, check=True)
 
 
-# ---------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 #  Public API
-# ---------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 
 
 def load_csv(
     *,
     csv_path: str | Path,
     table: str,
-    schema: Optional[str] = None,
-    col_types: Optional[Mapping[str, str]] = None,
-    infer_rows: int = 20_000,
+    schema: str | None = None,
+    host: str | None = None,
+    port: int | None = None,
+    col_types: Mapping[str, str] | None = None,
     dialect: str = "csv-unix",
-    threads: int = 4,
-    skip_rows: int = 0,
+    threads: int = 8,
+    skip_rows: int = 1,
     replace_duplicates: bool = False,
-    preprocess: bool = True,
-    dotenv_path: Optional[str | Path] = None,
 ) -> None:
-    """Stream-clean a CSV and load it into MySQL at wire-speed."""
-
-    csv_path = Path(csv_path)
-
-    # Allow the caller to point at a specific .env file
-    if dotenv_path:
-        load_dotenv(dotenv_path, override=True)
-
-    host = os.getenv("DB_HOST")
-    port = int(os.getenv("DB_PORT", DEFAULT_DB_PORT))
-
-    if not host:
-        raise EnvironmentError("DB_HOST not set; check your .env or pass dotenv_path")
+    csv_path = Path(csv_path).expanduser()
+    if not csv_path.exists():
+        raise FileNotFoundError(csv_path)
 
     schema = schema or os.getenv("DB_NAME")
-    if not schema:
-        raise ValueError("Schema not provided and DB_NAME env var is not set")
+    host = host or os.getenv("DB_HOST")
+    port = port or DEFAULT_DB_PORT
 
-    if preprocess:
-        csv_path = _clean_csv_to_temp(csv_path)
+    if schema is None or host is None:
+        raise RuntimeError("DB_HOST and DB_NAME must be set (env or argument)")
 
+    # 1. Clean NaNs/empties to \N for LOAD DATA
+    cleaned_path = _clean_csv_to_temp(csv_path)
+
+    # 2. Column types
     if col_types is None:
-        col_types = _infer_col_types(csv_path, infer_rows)
+        col_types = _infer_column_types(csv_path)
 
-    _create_table(host, port, schema, table, col_types, if_not_exists=True)
+    # 3. Create table if needed
+    _create_table(
+        host=host,
+        port=port,
+        schema=schema,
+        table=table,
+        col_types=col_types,
+        if_not_exists=True,
+    )
 
+    # 4. Import via mysqlsh
     _run_mysqlsh_import(
-        csv_path=csv_path,
+        csv_path=cleaned_path,
         host=host,
         port=port,
         schema=schema,
@@ -208,24 +324,7 @@ def load_csv(
         replace_duplicates=replace_duplicates,
     )
 
-
-# ---------------------------------------------------------------------------
-#  Column-type inference
-# ---------------------------------------------------------------------------
-
-
-def _infer_col_types(csv_path: Path, n_rows: int) -> OrderedDict[str, str]:
-    df = pd.read_csv(csv_path, nrows=n_rows)
-    types: OrderedDict[str, str] = OrderedDict()
-    for col in df.columns:
-        dtype = df[col].dtype
-        if pd.api.types.is_integer_dtype(dtype):
-            types[col] = "BIGINT"
-        elif pd.api.types.is_float_dtype(dtype):
-            types[col] = "DOUBLE"
-        elif pd.api.types.is_datetime64_any_dtype(dtype):
-            types[col] = "DATETIME"
-        else:
-            max_len = int(df[col].astype(str).str.len().max())
-            types[col] = f"VARCHAR({max_len})"
-    return types
+    print(
+        f"[load_csv] Imported {csv_path.name} → {schema}.{table} "
+        f"({len(col_types)} columns)"
+    )
