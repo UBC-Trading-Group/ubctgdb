@@ -80,7 +80,7 @@ def _clean_inplace(src: Path) -> None:
 
 def _infer_with_arrow(path: Path, *, header: bool) -> OrderedDict[str, str]:
     """
-    Scan the (cleaned or original) CSV with PyArrow and map Arrow → MySQL types.
+    Scan the CSV (cleaned or not) with PyArrow and map Arrow → MySQL types.
     """
     print("[infer] PyArrow schema inference …")
     t0 = time.perf_counter()
@@ -91,19 +91,19 @@ def _infer_with_arrow(path: Path, *, header: bool) -> OrderedDict[str, str]:
             autogenerate_column_names=not header,
             skip_rows=1 if header else 0,
         ),
-        # default delimiter “,” – no ParseOptions needed
     )
 
     col_types: OrderedDict[str, str] = OrderedDict()
     for name, col in zip(tbl.schema.names, tbl.columns, strict=True):
         pa_t = col.type
 
+        # ── numeric ----------------------------------------------------------------
         if pa.types.is_boolean(pa_t):
             col_types[name] = "TINYINT UNSIGNED"
 
         elif pa.types.is_integer(pa_t):
             mysql = {8: "TINYINT", 16: "SMALLINT", 32: "INT", 64: "BIGINT"}[pa_t.bit_width]
-            signed = pa.types.is_signed_integer(pa_t)         # robust signedness check
+            signed = pa.types.is_signed_integer(pa_t)
             col_types[name] = mysql if signed else f"{mysql} UNSIGNED"
 
         elif pa.types.is_floating(pa_t):
@@ -113,13 +113,30 @@ def _infer_with_arrow(path: Path, *, header: bool) -> OrderedDict[str, str]:
             p, s = pa_t.precision, pa_t.scale
             col_types[name] = f"DECIMAL({p},{s})" if p <= 38 else "DOUBLE"
 
-        else:  # string, binary, etc.
-            max_len = pa.compute.max(pa.compute.utf8_length(col)).as_py()
+        # ── temporal ---------------------------------------------------------------
+        elif pa.types.is_date(pa_t):
+            col_types[name] = "DATE"
+
+        elif pa.types.is_timestamp(pa_t):
+            col_types[name] = "DATETIME"
+
+        elif pa.types.is_time(pa_t):
+            col_types[name] = "TIME"
+
+        # ── string / binary --------------------------------------------------------
+        elif pa.types.is_string(pa_t) or pa.types.is_binary(pa_t):
+            # safe max-length: compute returns None if column is all nulls
+            max_len = pa.compute.max(pa.compute.utf8_length(col)).as_py() or 0
             col_types[name] = "TEXT" if max_len > 255 else f"VARCHAR({max_len})"
+
+        # ── fall-back --------------------------------------------------------------
+        else:
+            col_types[name] = "TEXT"
 
     print(f"[infer] Finished in {time.perf_counter() - t0:.1f} s "
           f"({len(col_types)} columns)")
     return col_types
+
 
 
 def _create_table(
