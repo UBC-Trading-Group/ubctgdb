@@ -1,5 +1,7 @@
 # ubctgdb
 
+A lightweight helper for UBC Trading Group analysts to query MySQL data in Python with local disk-cache and secure credential handling.
+
 ## Features
 
 | API | What it does |
@@ -28,14 +30,17 @@
 
 ## Installation
 
-```bash
-# 1) macOS / Linux — make sure MySQL client libs are present
-# macOS example:
-brew install mysql
+1. **macOS users:** install the MySQL client libraries:
 
-# 2️) Install the package 
-pip install git+https://github.com/UBC-Trading-Group/ubctgdb.git
-````
+   ```bash
+   brew install mysql
+   ```
+
+2. Install the package directly from GitHub:
+
+   ```bash
+   pip install git+https://github.com/UBC-Trading-Group/ubctgdb.git
+   ```
 
 ---
 
