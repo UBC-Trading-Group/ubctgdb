@@ -1,3 +1,14 @@
+r"""
+High-speed, version-proof CSV loader for MySQL.
+
+Key ideas
+---------
+* A streaming pre-clean pass turns blank cells and the string "NaN"
+  into the literal token ``\N`` that MySQL bulk loaders treat as NULL.
+* The ensuing LOAD DATA LOCAL INFILE can map every field directly onto
+  its column—no expressions, no user variables—so it works on **any**
+  MySQL Shell 8.x build and is as fast as the wire allows.
+"""
 from __future__ import annotations
 
 import os
@@ -5,7 +16,6 @@ import sys
 import subprocess
 import tempfile
 import csv
-
 from collections import OrderedDict
 from pathlib import Path
 from typing import Mapping, Optional
@@ -14,8 +24,17 @@ import pandas as pd
 import sqlalchemy as sa
 from dotenv import find_dotenv, load_dotenv
 
+# ---------------------------------------------------------------------------
+#  Environment
+# ---------------------------------------------------------------------------
+
 load_dotenv(find_dotenv(usecwd=True), override=False)
 DB_PORT = int(os.getenv("DB_PORT", 3306))
+
+# ---------------------------------------------------------------------------
+#  CSV pre-cleaner (streaming – O(1) memory)
+# ---------------------------------------------------------------------------
+
 
 def _clean_csv_to_temp(src_path: Path) -> Path:
     """
@@ -155,9 +174,8 @@ except Exception as e:
     cmd = ["mysqlsh", uri, "--py", "-e", py_script]
 
     # scrub password for debug echo
-    safe_cmd = cmd.copy()
     if password:
-        safe_cmd[1] = safe_cmd[1].replace(password, "***")
+        cmd[1] = cmd[1].replace(password, "***")
     print("[mysqlsh] Executing script…", file=sys.stderr)
 
     res = subprocess.run(cmd, capture_output=True, text=True)
@@ -190,7 +208,8 @@ def load_csv(
     preprocess: bool = True,
     dotenv_path: Optional[str | Path] = None,
 ) -> None:
-    
+    """Stream-clean a CSV and load it into MySQL at wire-speed."""
+
     if dotenv_path:
         load_dotenv(dotenv_path, override=False)
 
@@ -206,7 +225,9 @@ def load_csv(
     # Optional pre-clean pass
     # ------------------------------------------------------------------
     if preprocess:
-        print(f"[clean] Streaming {csv_path.name} → null-safe temp file…", file=sys.stderr)
+        print(
+            f"[clean] Streaming {csv_path.name} → null-safe temp file…", file=sys.stderr
+        )
         csv_path = _clean_csv_to_temp(csv_path)
         print(f"[clean] Done.  Temp file at {csv_path}", file=sys.stderr)
 
