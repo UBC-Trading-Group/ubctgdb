@@ -108,15 +108,14 @@ def _run_mysqlsh_import(
 
     cols = list(columns)
     if empty_as_null:
-        col_vars   = [f"@{c}" for c in cols]
-        col_assign = [
-            f"{c}=NULLIF(NULLIF(TRIM(@{c}), ''), 'NaN')" for c in cols
-        ]
-        options["columns"] = col_vars + col_assign
+        options["columns"] = list(cols)          # ('gvkey', 'datadate', …)
+        options["setColumnExpr"] = {
+            c: f"NULLIF(NULLIF(TRIM({c}), ''), 'NaN')" for c in cols
+        }
     else:
         # Simple case: map CSV columns directly to table columns.
-        options["columns"] = cols
-
+        options["columns"] = list(cols)
+        
     # --- Construct the Python script to be executed by mysqlsh ---
     py_script = f"""
 import sys
