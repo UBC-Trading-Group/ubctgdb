@@ -28,6 +28,9 @@ if dotenv_path:
     load_dotenv(dotenv_path, override=False)
 
 DEFAULT_DB_PORT = int(os.getenv("DB_PORT", "3306"))
+
+NULL_TOKEN = r"\N"                         
+NULL_MARKERS = {"", "na", "n/a", "nan", "null"}  
 _PROGRESS_EVERY = 500_000
 
 
@@ -63,7 +66,7 @@ def _clean_inplace(src: Path) -> None:
         r, w = csv.reader(fin), csv.writer(fout, lineterminator="\n")
         for i, row in enumerate(r, 1):
             w.writerow(
-                ("\\N" if (s := cell.strip()) in {"", "nan", "NaN", "NULL"} else s)
+                (NULL_TOKEN if cell.strip().lower() in NULL_MARKERS else cell.strip())
                 for cell in row
             )
             if i % _PROGRESS_EVERY == 0:
@@ -97,6 +100,9 @@ def _infer_schema(path: Path, *, header: bool) -> OrderedDict[str, str]:
         read_options=pacsv.ReadOptions(
             autogenerate_column_names=not header,
             skip_rows=0,
+        ),
+         convert_options=pacsv.ConvertOptions(
+            null_values=[NULL_TOKEN, *NULL_MARKERS]
         ),
     )
 
