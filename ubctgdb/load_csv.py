@@ -55,7 +55,7 @@ def _sqlalchemy_engine(host: str, port: int) -> sa.engine.Engine:
 
 def _q(name: str) -> str:  # quote identifier
     if "`" in name:
-        raise ValueError("Back‑tick in identifier: %s" % name)
+        raise ValueError("Back-tick in identifier: %s" % name)
     return f"`{name}`"
 
 
@@ -69,25 +69,22 @@ def _create_table(
 ) -> None:
     cols_sql = ",\n  ".join(f"{_q(c)} {t}" for c, t in col_types.items())
     ddl = (
-        f"CREATE TABLE {'IF NOT EXISTS ' if if_not_exists else ''}{_q(schema)}.{_q(table)} (\n  {cols_sql}\n) ENGINE=InnoDB;"
+        f"CREATE TABLE {'IF NOT EXISTS ' if if_not_exists else ''}"
+        f"{_q(schema)}.{_q(table)} (\n  {cols_sql}\n) ENGINE=InnoDB;"
     )
     with _sqlalchemy_engine(host, port).begin() as conn:
         conn.execute(sa.text(f"CREATE DATABASE IF NOT EXISTS {_q(schema)};"))
         conn.execute(sa.text(ddl))
 
 
-# ---------------------------------------------------------------------------
-#  mysqlsh wrapper
-# ---------------------------------------------------------------------------
-
 def _run_mysqlsh_import(
+    *,
     csv_path: Path,
     host: str,
     port: int,
     schema: str,
     table: str,
     columns: Iterable[str],
-    *,
     dialect: str,
     threads: int,
     skip_rows: int,
@@ -111,20 +108,20 @@ def _run_mysqlsh_import(
 
     cols = list(columns)
     if empty_as_null:
-        # This is the correct, documented way to perform transformations.
         # 1. Read CSV data into user variables via the 'columns' option.
         options["columns"] = [f"@{c}" for c in cols]
-        
-        # 2. Use 'columnOptions' to define the expressions that set the
-        #    final table columns from the user variables.
+
+        # 2. Map each table column to an expression that NULL-ifies empty strings
+        #    (and the common string "NaN") after trimming whitespace.
         column_opts = {}
         for c in cols:
-            column_opts[c] = {"expression": f"NULLIF(@{c}, '')"}
+            column_opts[c] = {
+                "expression": f"NULLIF(NULLIF(TRIM(@{c}), ''), 'NaN')"
+            }
         options["columnOptions"] = column_opts
     else:
         # Simple case: map CSV columns directly to table columns.
         options["columns"] = cols
-
 
     # --- Construct the Python script to be executed by mysqlsh ---
     py_script = f"""
@@ -151,7 +148,7 @@ except Exception as e:
     # Show a scrubbed command line for debugging
     safe_cmd_parts = list(cmd)
     if password:
-      safe_cmd_parts[1] = safe_cmd_parts[1].replace(password, "***")
+        safe_cmd_parts[1] = safe_cmd_parts[1].replace(password, "***")
     print("[mysqlsh] Executing script...", file=sys.stderr)
 
     # --- Run and capture output ---
@@ -167,10 +164,10 @@ except Exception as e:
             "mysqlsh import failed. See log above for details from mysqlsh."
         )
 
-
 # ---------------------------------------------------------------------------
 #  Public API
 # ---------------------------------------------------------------------------
+
 
 def load_csv(
     *,
@@ -186,12 +183,12 @@ def load_csv(
     empty_as_null: bool = True,
     dotenv_path: Optional[str | Path] = None,
 ) -> None:
-    """High‑speed CSV loader.
+    """High-speed CSV loader.
 
     Parameters
     ----------
     empty_as_null : bool, default True
-        Convert **all** empty strings to SQL `NULL` using `NULLIF(@var,'')`.
+        Convert **all** empty strings and the literal "NaN" to SQL NULLs.
     """
 
     if dotenv_path:
@@ -199,7 +196,9 @@ def load_csv(
 
     host = os.getenv("DB_HOST")
     if not host:
-        raise EnvironmentError("DB_HOST is not set; check your .env or pass dotenv_path.")
+        raise EnvironmentError(
+            "DB_HOST is not set; check your .env or pass dotenv_path."
+        )
 
     csv_path = Path(csv_path).expanduser().resolve()
     if not csv_path.is_file():
