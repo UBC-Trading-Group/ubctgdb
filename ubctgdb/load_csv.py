@@ -6,15 +6,21 @@ import shutil
 import subprocess
 import tempfile
 import time
-import pyarrow as pa
-import pyarrow.csv as pacsv
-
 from collections import OrderedDict
 from pathlib import Path
 from typing import Mapping
 
 import sqlalchemy as sa
 from dotenv import find_dotenv, load_dotenv
+
+try:
+    import pyarrow as pa
+    import pyarrow.csv as pacsv
+except ModuleNotFoundError as exc:               # Arrow is mandatory
+    raise ImportError(
+        "pyarrow >= 14 is required for load_csv(). "
+        "Install with:  pip install pyarrow"
+    ) from exc
 
 
 # ── environment ────────────────────────────────────────────────────────────
@@ -23,12 +29,12 @@ if dotenv_path:
     load_dotenv(dotenv_path, override=False)
 
 DEFAULT_DB_PORT: int = int(os.getenv("DB_PORT", "3306"))
-_PROGRESS_EVERY: int = 500_000             # always print every N lines
+_PROGRESS_EVERY: int = 500_000                   # always print progress
 
 
 # ── helpers ────────────────────────────────────────────────────────────────
 def _q(identifier: str) -> str:
-    """Back-tick quote a MySQL identifier."""
+    """Back-tick-quote a MySQL identifier."""
     if "`" in identifier:
         raise ValueError("back-tick in identifier")
     return f"`{identifier}`"
@@ -78,10 +84,25 @@ def _clean_inplace(src: Path) -> None:
     print(f"[clean] Done in {time.perf_counter() - t0:.1f} s")
 
 
+def _looks_like_data(value: str) -> bool:
+    """Return True for strings that resemble numbers or ISO dates."""
+    return (
+        value.replace(".", "", 1).lstrip("-").isdigit()
+        or (len(value) == 10 and value[4] == "-" and value[7] == "-")
+    )
+
+
 def _infer_with_arrow(path: Path, *, header: bool) -> OrderedDict[str, str]:
     """
-    Scan the CSV (cleaned or not) with PyArrow and map Arrow → MySQL types.
+    Scan the CSV with PyArrow and map Arrow → MySQL column types.
     """
+    # quick sniff to auto-disable header if first row looks like data
+    with path.open("r", encoding="utf-8") as _fh:
+        first_row = next(csv.reader([_fh.readline()]))
+    if header and any(_looks_like_data(x) for x in first_row):
+        print("[infer] First row looks like data; overriding header=False")
+        header = False
+
     print("[infer] PyArrow schema inference …")
     t0 = time.perf_counter()
 
@@ -97,7 +118,7 @@ def _infer_with_arrow(path: Path, *, header: bool) -> OrderedDict[str, str]:
     for name, col in zip(tbl.schema.names, tbl.columns, strict=True):
         pa_t = col.type
 
-        # ── numeric ----------------------------------------------------------------
+        # numeric ------------------------------------------------------------------
         if pa.types.is_boolean(pa_t):
             col_types[name] = "TINYINT UNSIGNED"
 
@@ -113,30 +134,26 @@ def _infer_with_arrow(path: Path, *, header: bool) -> OrderedDict[str, str]:
             p, s = pa_t.precision, pa_t.scale
             col_types[name] = f"DECIMAL({p},{s})" if p <= 38 else "DOUBLE"
 
-        # ── temporal ---------------------------------------------------------------
+        # temporal -----------------------------------------------------------------
         elif pa.types.is_date(pa_t):
             col_types[name] = "DATE"
-
         elif pa.types.is_timestamp(pa_t):
             col_types[name] = "DATETIME"
-
         elif pa.types.is_time(pa_t):
             col_types[name] = "TIME"
 
-        # ── string / binary --------------------------------------------------------
+        # string / binary ----------------------------------------------------------
         elif pa.types.is_string(pa_t) or pa.types.is_binary(pa_t):
-            # safe max-length: compute returns None if column is all nulls
             max_len = pa.compute.max(pa.compute.utf8_length(col)).as_py() or 0
             col_types[name] = "TEXT" if max_len > 255 else f"VARCHAR({max_len})"
 
-        # ── fall-back --------------------------------------------------------------
+        # fall-back ----------------------------------------------------------------
         else:
             col_types[name] = "TEXT"
 
     print(f"[infer] Finished in {time.perf_counter() - t0:.1f} s "
           f"({len(col_types)} columns)")
     return col_types
-
 
 
 def _create_table(
@@ -148,13 +165,13 @@ def _create_table(
     col_types: Mapping[str, str],
 ) -> None:
     ddl_cols = ",\n  ".join(f"{_q(c)} {t}" for c, t in col_types.items())
-    ddl = (
-        f"CREATE DATABASE IF NOT EXISTS {_q(schema)};\n"
+    ddl_table = (
         f"CREATE TABLE IF NOT EXISTS {_q(schema)}.{_q(table)} (\n  "
         f"{ddl_cols}\n) ENGINE=InnoDB;"
     )
     with _sqlalchemy_engine(host, port).begin() as conn:
-        conn.execute(sa.text(ddl))
+        conn.execute(sa.text(f"CREATE DATABASE IF NOT EXISTS {_q(schema)}"))
+        conn.execute(sa.text(ddl_table))
 
 
 def _mysqlsh_import(
@@ -187,7 +204,7 @@ def _mysqlsh_import(
         f"--dialect={dialect}",
         f"--threads={threads}",
         f"--skipRows={skip_rows}",
-        "--showProgress=true",               # built-in progress bar (always on)
+        "--showProgress=true",               # built-in progress bar
     ]
     if replace_duplicates:
         cmd.append("--onDuplicateKeyUpdate")
@@ -207,9 +224,25 @@ def load_csv(
     dialect: str = "csv-unix",
     threads: int = 8,
     replace_duplicates: bool = False,
-    clean: bool = True,                   
+    clean: bool = True,                     # True → clean first
 ) -> None:
-    
+    """
+    Import a (large) CSV into MySQL using MySQL-Shell’s parallel importer.
+
+    Steps
+    -----
+    1. Optionally clean the CSV in-place (''/NaN/NULL → \\N).
+    2. Infer column types with PyArrow.
+    3. Create the destination table if needed.
+    4. Bulk-load with `mysqlsh util import-table`.
+
+    Parameters
+    ----------
+    csv_path : str | Path
+        Path to the CSV file (will be overwritten if `clean=True`).
+    clean : bool, default True
+        Skip the cleaning step if the file is already MySQL-ready.
+    """
     src = Path(csv_path).expanduser()
     if not src.exists():
         raise FileNotFoundError(src)
