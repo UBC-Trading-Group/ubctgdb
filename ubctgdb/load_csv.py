@@ -77,7 +77,7 @@ def _create_table(
 
 
 # ---------------------------------------------------------------------------
-#  mysqlsh wrapper 
+#  mysqlsh wrapper
 # ---------------------------------------------------------------------------
 
 def _run_mysqlsh_import(
@@ -111,22 +111,19 @@ def _run_mysqlsh_import(
 
     cols = list(columns)
     if empty_as_null:
-        # For each field produce a user variable then set column = NULLIF(@var,'')
-        # This is passed as a Python list of strings, which is robust.
-        col_spec_parts: List[str] = []
-        for c in cols:
-            col_spec_parts.append(f"@{c}")
-            # Use single quotes for the SQL empty string literal ''
-            col_spec_parts.append(f"{c}=NULLIF(@{c},'')")
-        options["columns"] = col_spec_parts
+        # When converting empty to NULL, we must use user variables (@col) in the
+        # 'columns' option and then use the 'set' option to perform the transformation.
+        # This generates the correct `LOAD DATA ... (@col1, @col2) SET col1=NULLIF(...)` syntax.
+        user_vars = [f"@{c}" for c in cols]
+        set_expressions = [f"{c}=NULLIF(@{c},'')" for c in cols]
+        options["columns"] = user_vars
+        options["set"] = set_expressions
     else:
+        # Simple case: map CSV columns directly to table columns.
         options["columns"] = cols
 
+
     # --- Construct the Python script to be executed by mysqlsh ---
-    # We build a Python script as a string and pass it to mysqlsh via `-e`.
-    # This completely avoids command-line argument parsing issues.
-    # Note: util.import_table is the Python API equivalent of util import-table.
-    # The csv_path.as_posix() ensures cross-platform compatibility for the path string.
     py_script = f"""
 import sys
 try:
@@ -143,22 +140,20 @@ except Exception as e:
     cmd: List[str] = [
         "mysqlsh",
         uri,
-        "--py",  # Switch to Python mode
-        "-e",    # Execute the following string
+        "--py",
+        "-e",
         py_script,
     ]
 
     # Show a scrubbed command line for debugging
     safe_cmd_parts = list(cmd)
-    safe_cmd_parts[1] = safe_cmd_parts[1].replace(password, "***")
+    if password:
+      safe_cmd_parts[1] = safe_cmd_parts[1].replace(password, "***")
     print("[mysqlsh] Executing script...", file=sys.stderr)
-    # The script itself is too long to print nicely, but we can see the options dict above.
-    # print(" ".join(shlex.quote(p) for p in safe_cmd_parts), file=sys.stderr)
 
     # --- Run and capture output ---
     res = subprocess.run(cmd, capture_output=True, text=True)
-    
-    # Print the output from the mysqlsh execution
+
     if res.stdout:
         print(res.stdout, file=sys.stderr)
     if res.stderr:
@@ -194,8 +189,6 @@ def load_csv(
     ----------
     empty_as_null : bool, default True
         Convert **all** empty strings to SQL `NULL` using `NULLIF(@var,'')`.
-        Note: This was changed from False to True in the docstring to match the
-        function signature's default.
     """
 
     if dotenv_path:
