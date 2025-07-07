@@ -20,7 +20,7 @@ from dotenv import find_dotenv, load_dotenv
 
 # Load variables from a .env in the cwd (or a parent); keep any that are
 # already set in the process environment.
-load_dotenv(find_dotenv(usecwd=True))
+load_dotenv(find_dotenv())
 DEFAULT_DB_PORT = 3306
 
 # ---------------------------------------------------------------------------
