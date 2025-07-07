@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import os
+import re
 import sys
+import csv
 import subprocess
 import tempfile
-import csv
 from collections import OrderedDict
 from pathlib import Path
 from typing import Mapping, Optional
@@ -17,8 +18,10 @@ from dotenv import find_dotenv, load_dotenv
 #  Environment
 # ---------------------------------------------------------------------------
 
-load_dotenv(find_dotenv(usecwd=True), override=False)
-DB_PORT = int(os.getenv("DB_PORT", 3306))
+# Load variables from a .env in the cwd (or a parent); keep any that are
+# already set in the process environment.
+load_dotenv(find_dotenv(usecwd=True))
+DEFAULT_DB_PORT = 3306
 
 # ---------------------------------------------------------------------------
 #  CSV pre-cleaner (streaming – O(1) memory)
@@ -29,7 +32,7 @@ def _clean_csv_to_temp(src_path: Path) -> Path:
     fd, tmp_name = tempfile.mkstemp(
         suffix=".csv", prefix="clean_", dir=src_path.parent
     )
-    os.close(fd)  # we'll reopen with csv module
+    os.close(fd)  # close the descriptor; we’ll reopen with csv module
 
     tmp_path = Path(tmp_name)
 
@@ -54,26 +57,8 @@ def _clean_csv_to_temp(src_path: Path) -> Path:
 
 
 # ---------------------------------------------------------------------------
-#  Helpers
+#  SQL helpers
 # ---------------------------------------------------------------------------
-
-_SQL_TYPE_MAP = {
-    "int64": "BIGINT",
-    "Int64": "BIGINT",
-    "float64": "DOUBLE",
-    "object": "TEXT",
-    "string": "TEXT",
-    "datetime64[ns]": "DATETIME",
-    "bool": "TINYINT(1)",
-}
-
-
-def _infer_col_types(csv_path: Path, n_rows: int = 20_000) -> "OrderedDict[str, str]":
-    sample = pd.read_csv(csv_path, nrows=n_rows)
-    out: "OrderedDict[str, str]" = OrderedDict()
-    for col, dtype in sample.dtypes.items():
-        out[col] = _SQL_TYPE_MAP.get(str(dtype), "TEXT")
-    return out
 
 
 def _sqlalchemy_engine(host: str, port: int) -> sa.engine.Engine:
@@ -140,16 +125,11 @@ def _run_mysqlsh_import(
     }
 
     py_script = f"""
-import sys
-try:
-    util.import_table(
-        r'{csv_path.as_posix()}',
-        {options}
-    )
-    print("Import successful.")
-except Exception as e:
-    print(f"ERROR: {{e}}", file=sys.stderr)
-    sys.exit(1)
+import util
+util.import_table(
+    {str(csv_path)!r},
+    {options!r},
+)
 """
 
     cmd = ["mysqlsh", uri, "--py", "-e", py_script]
@@ -191,40 +171,34 @@ def load_csv(
 ) -> None:
     """Stream-clean a CSV and load it into MySQL at wire-speed."""
 
+    csv_path = Path(csv_path)
+
+    # Allow the caller to point at a specific .env file
     if dotenv_path:
-        load_dotenv(dotenv_path, override=False)
+        load_dotenv(dotenv_path, override=True)
 
     host = os.getenv("DB_HOST")
+    port = int(os.getenv("DB_PORT", DEFAULT_DB_PORT))
+
     if not host:
-        raise EnvironmentError("DB_HOST not set; check your .env or pass dotenv_path.")
-
-    csv_path = Path(csv_path).expanduser().resolve()
-    if not csv_path.is_file():
-        raise FileNotFoundError(csv_path)
-
-    # ------------------------------------------------------------------
-    # Optional pre-clean pass
-    # ------------------------------------------------------------------
-    if preprocess:
-        print(
-            f"[clean] Streaming {csv_path.name} → null-safe temp file…", file=sys.stderr
-        )
-        csv_path = _clean_csv_to_temp(csv_path)
-        print(f"[clean] Done.  Temp file at {csv_path}", file=sys.stderr)
+        raise EnvironmentError("DB_HOST not set; check your .env or pass dotenv_path")
 
     schema = schema or os.getenv("DB_NAME")
     if not schema:
-        raise ValueError("Schema not provided and DB_NAME env var is not set.")
+        raise ValueError("Schema not provided and DB_NAME env var is not set")
+
+    if preprocess:
+        csv_path = _clean_csv_to_temp(csv_path)
 
     if col_types is None:
         col_types = _infer_col_types(csv_path, infer_rows)
 
-    _create_table(host, DB_PORT, schema, table, col_types, if_not_exists=True)
+    _create_table(host, port, schema, table, col_types, if_not_exists=True)
 
     _run_mysqlsh_import(
         csv_path=csv_path,
         host=host,
-        port=DB_PORT,
+        port=port,
         schema=schema,
         table=table,
         columns=list(col_types.keys()),
@@ -233,3 +207,25 @@ def load_csv(
         skip_rows=skip_rows,
         replace_duplicates=replace_duplicates,
     )
+
+
+# ---------------------------------------------------------------------------
+#  Column-type inference
+# ---------------------------------------------------------------------------
+
+
+def _infer_col_types(csv_path: Path, n_rows: int) -> OrderedDict[str, str]:
+    df = pd.read_csv(csv_path, nrows=n_rows)
+    types: OrderedDict[str, str] = OrderedDict()
+    for col in df.columns:
+        dtype = df[col].dtype
+        if pd.api.types.is_integer_dtype(dtype):
+            types[col] = "BIGINT"
+        elif pd.api.types.is_float_dtype(dtype):
+            types[col] = "DOUBLE"
+        elif pd.api.types.is_datetime64_any_dtype(dtype):
+            types[col] = "DATETIME"
+        else:
+            max_len = int(df[col].astype(str).str.len().max())
+            types[col] = f"VARCHAR({max_len})"
+    return types
