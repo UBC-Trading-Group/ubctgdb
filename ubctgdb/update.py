@@ -70,7 +70,10 @@ def _append_staging(csv_path, table, key_cols, schema, host, port, **upload_csv_
     with _eng(database=schema, host=host, port=port).begin() as conn:
         insp = sa.inspect(conn)
         all_cols = [c["name"] for c in insp.get_columns(stage, schema=schema)]
-        cols_sql = ", ".join(_q(c) for c in all_cols)
+        
+        # CORRECTED: Prefix all columns with `s.` to resolve ambiguity.
+        cols_to_insert = ", ".join(_q(c) for c in all_cols)
+        cols_to_select = ", ".join(f"s.{_q(c)}" for c in all_cols)
         
         join_conditions = " AND ".join(
             f"t.{_q(k)} = s.{_q(k)}" for k in key_list
@@ -79,8 +82,8 @@ def _append_staging(csv_path, table, key_cols, schema, host, port, **upload_csv_
         # This query finds all rows in the staging table `s` that do not have a
         # matching key in the target table `t` and inserts them.
         query = f"""
-            INSERT INTO {_q(schema)}.{_q(table)} ({cols_sql})
-            SELECT {cols_sql}
+            INSERT INTO {_q(schema)}.{_q(table)} ({cols_to_insert})
+            SELECT {cols_to_select}
             FROM {_q(schema)}.{_q(stage)} AS s
             LEFT JOIN {_q(schema)}.{_q(table)} AS t ON {join_conditions}
             WHERE t.{_q(key_list[0])} IS NULL

@@ -89,8 +89,8 @@ print(cs_fresh.tail())
 from ubctgdb import upload_csv
 
 upload_csv(
-    csv_path      = "/path/to/all_daily.csv",
-    table         = "all_daily_prices",
+    csv_path      = "/path/to/.csv",
+    table         = "table",
     header        = None,            # None → auto-detect, True/False to force
     replace_table = True,            # drop & recreate table
     threads       = 8,              # mysqlsh parallel threads
@@ -117,7 +117,7 @@ upload_dataframe(
 ```
 
 Internally, the function writes the DataFrame to a temp CSV and re-uses the same
-high-performance MySQL Shell importer as `upload_csv()`.
+MySQL Shell importer as `upload_csv()`.
 
 ---
 
@@ -130,7 +130,7 @@ from ubctgdb import append_csv
 
 append_csv(
     csv_path = "daily_2025-07-06.csv",
-    table    = "all_daily_prices",
+    table    = "daily",
     key_cols = ["gvkey", "datadate"],     # composite primary key in MySQL
     mode     = "staging",                 # default: bulk-load → INSERT IGNORE
 )
@@ -142,9 +142,9 @@ append_csv(
 from ubctgdb import append_dataframe
 append_dataframe(
     df,
-    table    = "all_daily_prices",
+    table    = "daily",
     key_cols = ["gvkey", "datadate"],
-)
+)  
 ```
 
 * `mode="staging"` (default) uses a temporary staging table + `INSERT IGNORE`
