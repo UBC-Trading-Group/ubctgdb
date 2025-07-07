@@ -9,7 +9,6 @@ setup(
         "pandas>=2.0",
         "diskcache>=5.0",
         "python-dotenv>=1.0",
-        "tqdm>=4.0",        
         "mysqlclient>=2.0",  
         "PyMySQL>=1.0",       
         "pyarrow>=10.0",     
