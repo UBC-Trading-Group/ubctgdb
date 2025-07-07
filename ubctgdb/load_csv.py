@@ -52,6 +52,7 @@ def _sqlalchemy_engine(host: str, port: int) -> sa.engine.Engine:
     return sa.create_engine(url, pool_pre_ping=True, pool_recycle=1800)
 
 
+# ── cleaning ───────────────────────────────────────────────────────────────
 def _clean_inplace(src: Path) -> None:
     """
     Atomically overwrite *src* so that '', NaN, NULL → \\N
@@ -84,25 +85,35 @@ def _clean_inplace(src: Path) -> None:
     print(f"[clean] Done in {time.perf_counter() - t0:.1f} s")
 
 
+# ── header detection ───────────────────────────────────────────────────────
 def _looks_like_data(value: str) -> bool:
-    """Return True for strings that resemble numbers or ISO dates."""
+    """Return True for numbers or ISO-dates (YYYY-MM-DD)."""
     return (
         value.replace(".", "", 1).lstrip("-").isdigit()
         or (len(value) == 10 and value[4] == "-" and value[7] == "-")
     )
 
 
+def _detect_header(path: Path, assume_header: bool) -> bool:
+    """
+    Fast sniff of first row: if the user said header=True but the row looks
+    like data, flip to False and warn.
+    """
+    if not assume_header:
+        return False
+    with path.open("r", encoding="utf-8") as fh:
+        first_row = next(csv.reader([fh.readline()]))
+    if any(_looks_like_data(c) for c in first_row):
+        print("[load_csv] First row looks like data; treating file as header=False")
+        return False
+    return True
+
+
+# ── Arrow schema inference ────────────────────────────────────────────────
 def _infer_with_arrow(path: Path, *, header: bool) -> OrderedDict[str, str]:
     """
-    Scan the CSV with PyArrow and map Arrow → MySQL column types.
+    Scan the CSV with PyArrow and map Arrow → MySQL types.
     """
-    # quick sniff to auto-disable header if first row looks like data
-    with path.open("r", encoding="utf-8") as _fh:
-        first_row = next(csv.reader([_fh.readline()]))
-    if header and any(_looks_like_data(x) for x in first_row):
-        print("[infer] First row looks like data; overriding header=False")
-        header = False
-
     print("[infer] PyArrow schema inference …")
     t0 = time.perf_counter()
 
@@ -118,23 +129,20 @@ def _infer_with_arrow(path: Path, *, header: bool) -> OrderedDict[str, str]:
     for name, col in zip(tbl.schema.names, tbl.columns, strict=True):
         pa_t = col.type
 
-        # numeric ------------------------------------------------------------------
+        # numeric ---------------------------------------------------------------
         if pa.types.is_boolean(pa_t):
             col_types[name] = "TINYINT UNSIGNED"
-
         elif pa.types.is_integer(pa_t):
             mysql = {8: "TINYINT", 16: "SMALLINT", 32: "INT", 64: "BIGINT"}[pa_t.bit_width]
             signed = pa.types.is_signed_integer(pa_t)
             col_types[name] = mysql if signed else f"{mysql} UNSIGNED"
-
         elif pa.types.is_floating(pa_t):
             col_types[name] = "DOUBLE"
-
         elif pa.types.is_decimal(pa_t):
             p, s = pa_t.precision, pa_t.scale
             col_types[name] = f"DECIMAL({p},{s})" if p <= 38 else "DOUBLE"
 
-        # temporal -----------------------------------------------------------------
+        # temporal --------------------------------------------------------------
         elif pa.types.is_date(pa_t):
             col_types[name] = "DATE"
         elif pa.types.is_timestamp(pa_t):
@@ -142,12 +150,12 @@ def _infer_with_arrow(path: Path, *, header: bool) -> OrderedDict[str, str]:
         elif pa.types.is_time(pa_t):
             col_types[name] = "TIME"
 
-        # string / binary ----------------------------------------------------------
+        # string / binary -------------------------------------------------------
         elif pa.types.is_string(pa_t) or pa.types.is_binary(pa_t):
             max_len = pa.compute.max(pa.compute.utf8_length(col)).as_py() or 0
             col_types[name] = "TEXT" if max_len > 255 else f"VARCHAR({max_len})"
 
-        # fall-back ----------------------------------------------------------------
+        # fall-back -------------------------------------------------------------
         else:
             col_types[name] = "TEXT"
 
@@ -156,6 +164,7 @@ def _infer_with_arrow(path: Path, *, header: bool) -> OrderedDict[str, str]:
     return col_types
 
 
+# ── DDL creation ──────────────────────────────────────────────────────────
 def _create_table(
     *,
     host: str,
@@ -174,6 +183,7 @@ def _create_table(
         conn.execute(sa.text(ddl_table))
 
 
+# ── mysqlsh bulk import ───────────────────────────────────────────────────
 def _mysqlsh_import(
     path: Path,
     *,
@@ -204,7 +214,7 @@ def _mysqlsh_import(
         f"--dialect={dialect}",
         f"--threads={threads}",
         f"--skipRows={skip_rows}",
-        "--showProgress=true",               # built-in progress bar
+        "--showProgress=true",
     ]
     if replace_duplicates:
         cmd.append("--onDuplicateKeyUpdate")
@@ -212,7 +222,7 @@ def _mysqlsh_import(
     subprocess.run(cmd, check=True)
 
 
-# ── public API ─────────────────────────────────────────────────────────────
+# ── public API ────────────────────────────────────────────────────────────
 def load_csv(
     *,
     csv_path: str | Path,
@@ -224,24 +234,10 @@ def load_csv(
     dialect: str = "csv-unix",
     threads: int = 8,
     replace_duplicates: bool = False,
-    clean: bool = True,                     # True → clean first
+    clean: bool = True,
 ) -> None:
     """
-    Import a (large) CSV into MySQL using MySQL-Shell’s parallel importer.
-
-    Steps
-    -----
-    1. Optionally clean the CSV in-place (''/NaN/NULL → \\N).
-    2. Infer column types with PyArrow.
-    3. Create the destination table if needed.
-    4. Bulk-load with `mysqlsh util import-table`.
-
-    Parameters
-    ----------
-    csv_path : str | Path
-        Path to the CSV file (will be overwritten if `clean=True`).
-    clean : bool, default True
-        Skip the cleaning step if the file is already MySQL-ready.
+    Import a (large) CSV into MySQL via mysqlsh’s parallel importer.
     """
     src = Path(csv_path).expanduser()
     if not src.exists():
@@ -253,14 +249,17 @@ def load_csv(
     if not schema or not host:
         raise RuntimeError("DB_HOST and DB_NAME must be set (env or argument)")
 
-    # 1 · Clean (optional)
+    # 0 · Clean (optional)
     if clean:
         _clean_inplace(src)
 
-    # 2 · Infer types
+    # 1 · Decide header for the rest of the pipeline
+    header = _detect_header(src, header)
+
+    # 2 · Infer schema
     col_types = _infer_with_arrow(src, header=header)
 
-    # 3 · Create table (if absent)
+    # 3 · Create table if needed
     _create_table(
         host=host,
         port=port,
@@ -269,7 +268,7 @@ def load_csv(
         col_types=col_types,
     )
 
-    # 4 · Import via mysqlsh
+    # 4 · Import
     _mysqlsh_import(
         src,
         host=host,
@@ -283,7 +282,5 @@ def load_csv(
         replace_duplicates=replace_duplicates,
     )
 
-    print(
-        f"[load_csv] Imported {src.name} → {schema}.{table} "
-        f"({len(col_types)} columns)"
-    )
+    print(f"[load_csv] Imported {src.name} → {schema}.{table} "
+          f"({len(col_types)} columns)")
