@@ -25,13 +25,17 @@ def append_csv(
     **upload_csv_kw,
 ) -> None:
     """
-    Append/merge *csv_path* into *schema.table*.
+    Append/merge *csv_path* into *schema.table*, preventing duplicates.
 
-    • **staging** (default): bulk-load into temp table → INSERT IGNORE.
-      Relies on a PRIMARY or UNIQUE key on the target table. The `key_cols`
-      parameter is a reminder for this but is not used in the SQL.
-    • **watermark**: assumes a monotone column (e.g., date); skips older rows.
-      The first column in `key_cols` is used as the watermark column.
+    • **staging** (default): Inserts new rows based on a logical key.
+      It finds all rows in the CSV whose values in `key_cols` do not
+      exist in the target table and inserts only them. This is the most
+      robust method for general-purpose updates.
+
+    • **watermark**: Assumes a monotonically increasing column (e.g., a date).
+      It finds the maximum value of the first column in `key_cols` in the
+      target table and only inserts rows from the CSV that are newer.
+      This is faster for simple time-series appends.
     """
     if mode not in {"staging", "watermark"}:
         raise ValueError("mode must be 'staging' or 'watermark'")
@@ -49,25 +53,48 @@ def append_csv(
 
 
 def _append_staging(csv_path, table, key_cols, schema, host, port, **upload_csv_kw):
+    """
+    Uploads CSV to a staging table, then inserts only rows with keys that
+    don't already exist in the target table.
+    """
+    key_list = list(key_cols)
+    if not key_list:
+        raise ValueError("key_cols must be non-empty for 'staging' mode")
+
     stage = f"{table}_staging_{int(time.time())}"
     upload_csv(
-        csv_path=csv_path,
-        table=stage,
-        schema=schema,
-        host=host,
-        port=port,
-        replace_table=True,
-        **upload_csv_kw,
+        csv_path=csv_path, table=stage, schema=schema, host=host, port=port,
+        replace_table=True, **upload_csv_kw
     )
+
     with _eng(database=schema, host=host, port=port).begin() as conn:
-        conn.execute(sa.text(
-            f"INSERT IGNORE INTO {_q(schema)}.{_q(table)} "
-            f"SELECT * FROM {_q(schema)}.{_q(stage)}"
-        ))
+        insp = sa.inspect(conn)
+        all_cols = [c["name"] for c in insp.get_columns(stage, schema=schema)]
+        cols_sql = ", ".join(_q(c) for c in all_cols)
+        
+        join_conditions = " AND ".join(
+            f"t.{_q(k)} = s.{_q(k)}" for k in key_list
+        )
+        
+        # This query finds all rows in the staging table `s` that do not have a
+        # matching key in the target table `t` and inserts them.
+        query = f"""
+            INSERT INTO {_q(schema)}.{_q(table)} ({cols_sql})
+            SELECT {cols_sql}
+            FROM {_q(schema)}.{_q(stage)} AS s
+            LEFT JOIN {_q(schema)}.{_q(table)} AS t ON {join_conditions}
+            WHERE t.{_q(key_list[0])} IS NULL
+        """
+        
+        conn.execute(sa.text(query))
         conn.execute(sa.text(f"DROP TABLE {_q(schema)}.{_q(stage)}"))
 
 
 def _append_watermark(csv_path, table, key_cols, schema, host, port, **upload_csv_kw):
+    """
+    Uploads CSV to a staging table, deletes rows from staging that are older
+    than the max "watermark" column in the target table, then inserts the rest.
+    """
     try:
         date_col = next(iter(key_cols))
     except StopIteration:
@@ -75,13 +102,8 @@ def _append_watermark(csv_path, table, key_cols, schema, host, port, **upload_cs
 
     stage = f"{table}_staging_{int(time.time())}"
     upload_csv(
-        csv_path=csv_path,
-        table=stage,
-        schema=schema,
-        host=host,
-        port=port,
-        replace_table=True,
-        **upload_csv_kw,
+        csv_path=csv_path, table=stage, schema=schema, host=host, port=port,
+        replace_table=True, **upload_csv_kw,
     )
 
     with _eng(database=schema, host=host, port=port).begin() as conn:
@@ -89,31 +111,39 @@ def _append_watermark(csv_path, table, key_cols, schema, host, port, **upload_cs
             sa.text(f"SELECT MAX({_q(date_col)}) FROM {_q(schema)}.{_q(table)}")
         )
 
+        # If a max_date exists, remove all rows from the staging table that
+        # are not newer than it.
+        if max_date is not None:
+            conn.execute(
+                sa.text(f"DELETE FROM {_q(schema)}.{_q(stage)} WHERE {_q(date_col)} <= :max_date"),
+                {"max_date": max_date}
+            )
+
+        # Insert all remaining (i.e., new) rows from staging into the target.
+        # Use INSERT IGNORE as a final safeguard against odd edge cases like
+        # duplicate rows within the new CSV data itself.
         insp = sa.inspect(conn)
         all_cols = [c["name"] for c in insp.get_columns(stage, schema=schema)]
         cols_sql = ", ".join(_q(c) for c in all_cols)
-
-        query = f"""
-            INSERT IGNORE INTO {_q(schema)}.{_q(table)} ({cols_sql})
-            SELECT {cols_sql} FROM {_q(schema)}.{_q(stage)}
-        """
-        params = {}
-        if max_date is not None:
-            query += f" WHERE {_q(date_col)} > :max_date"
-            params["max_date"] = max_date
-
-        conn.execute(sa.text(query), params)
+        
+        conn.execute(sa.text(
+            f"INSERT IGNORE INTO {_q(schema)}.{_q(table)} ({cols_sql}) "
+            f"SELECT {cols_sql} FROM {_q(schema)}.{_q(stage)}"
+        ))
+        
         conn.execute(sa.text(f"DROP TABLE {_q(schema)}.{_q(stage)}"))
 
 
 def append_dataframe(df: pd.DataFrame, **kw) -> None:
     """Same API as :func:`append_csv`, but starts from a DataFrame."""
     with tempfile.NamedTemporaryFile(
-        suffix=".csv", prefix="df_", delete=False
+        suffix=".csv", prefix="df_", delete=False, mode="w", encoding="utf-8"
     ) as tmp:
         path = Path(tmp.name)
-    try:
         df.to_csv(path, index=False, na_rep=NULL_TOKEN)
+        # We need to close the file handle before append_csv opens it
+    
+    try:
         append_csv(csv_path=path, **kw)
     finally:
         path.unlink(missing_ok=True)

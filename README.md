@@ -57,23 +57,28 @@ DB_NAME=ubctg
 ```python
 import ubctgdb as db
 
-# Grab an entire table (cached 24 h)
-df_all = db.run_sql("SELECT * FROM consumer_sentiment;")
-print(df_all.head())
+# Example 1: grab everything
+sql_all = '''
+SELECT *
+FROM Consumer_Sentiment;
+'''
+cs_all = db.run_sql(sql_all)
+print(cs_all.head())
 
-# Parameterised date range
-start, end = "2020-01-01", "2021-12-31"
-sql = f"""
+# Example 2: date-bounded query
+start, end = '2020-01-01', '2021-12-31'
+sql_window = f'''
 SELECT date, umcsent
-FROM consumer_sentiment
+FROM Consumer_Sentiment
 WHERE date BETWEEN '{start}' AND '{end}'
 ORDER BY date;
-"""
-df_win = db.run_sql(sql)
-print(df_win.tail())
+'''
+cs_window = db.run_sql(sql_window)
+print(cs_window.tail())
 
-# Force a fresh pull (bypass cache)
-df_fresh = db.run_sql(sql, refresh=True)
+# Example 3: force a fresh pull (bypass cache)
+cs_fresh = db.run_sql(sql_window, refresh=True)
+print(cs_fresh.tail())
 ```
 
 ---
@@ -86,10 +91,10 @@ from ubctgdb import upload_csv
 upload_csv(
     csv_path      = "/path/to/all_daily.csv",
     table         = "all_daily_prices",
-    schema        = "ubctg",         # defaults to DB_NAME if omitted
     header        = None,            # None → auto-detect, True/False to force
     replace_table = True,            # drop & recreate table
-    threads       = 12,              # mysqlsh parallel threads
+    threads       = 8,              # mysqlsh parallel threads
+    clean         = True,            # ensures empty strings are null (overwrites csv)
 )
 ```
 
