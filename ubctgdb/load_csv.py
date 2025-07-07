@@ -7,6 +7,10 @@ import shutil
 import subprocess
 import tempfile
 import time
+
+import pyarrow as pa
+import pyarrow.csv as pacsv
+
 from collections import OrderedDict
 from pathlib import Path
 from typing import Mapping
@@ -14,11 +18,8 @@ from typing import Mapping
 import sqlalchemy as sa
 from dotenv import find_dotenv, load_dotenv
 
-try:
-    import pyarrow as pa
-    import pyarrow.csv as pacsv
-except ModuleNotFoundError as exc:
-    raise ImportError("pyarrow >= 14 required.  pip install pyarrow") from exc
+
+    
 
 
 # ── env ------------------------------------------------------------------
@@ -95,7 +96,7 @@ def _infer_schema(path: Path, *, header: bool) -> OrderedDict[str, str]:
         path,
         read_options=pacsv.ReadOptions(
             autogenerate_column_names=not header,
-            skip_rows=1 if header else 0,
+            skip_rows=0,
         ),
     )
 
@@ -172,7 +173,7 @@ def _mysqlsh(path: Path, *, host: str, port: int, schema: str, table: str,
         f"--skipRows={skip_rows}", "--showProgress=true",
     ]
     if replace_dup:
-        cmd.append("--onDuplicateKeyUpdate")
+        cmd.append("--replaceDuplicates")
     subprocess.run(cmd, check=True)
 
 
@@ -216,8 +217,7 @@ def load_csv(
         header = _auto_header(src)
 
     types = _infer_schema(src, header=header)
-    if not header:
-        types = _safe_names(types)
+    types = _safe_names(types)
 
     _create_table(host, port, schema, table, types, replace=replace_table)
 
