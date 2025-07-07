@@ -1,14 +1,3 @@
-r"""
-High-speed, version-proof CSV loader for MySQL.
-
-Key ideas
----------
-* A streaming pre-clean pass turns blank cells and the string "NaN"
-  into the literal token ``\N`` that MySQL bulk loaders treat as NULL.
-* The ensuing LOAD DATA LOCAL INFILE can map every field directly onto
-  its column—no expressions, no user variables—so it works on **any**
-  MySQL Shell 8.x build and is as fast as the wire allows.
-"""
 from __future__ import annotations
 
 import os
@@ -135,10 +124,6 @@ def _run_mysqlsh_import(
     skip_rows: int,
     replace_duplicates: bool,
 ) -> None:
-    """
-    Wrapper around `mysqlsh util.importTable`.  Assumes *csv_path* already
-    contains '\N' for NULL, so we can map fields directly onto columns.
-    """
     user = os.getenv("DB_USER")
     password = os.getenv("DB_PASS")
 
