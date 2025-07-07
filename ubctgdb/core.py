@@ -45,7 +45,7 @@ def sqlalchemy_engine(
         username=os.getenv("DB_USER"),
         password=os.getenv("DB_PASS"),
         host=host or os.getenv("DB_HOST"),
-        port=port or int(os.getenv("DB_PORT", "3306")),
+        port=port or int(os.getenv("DB_PORT") or "3306"),
         database=database or os.getenv("DB_NAME"), 
     )
     return sa.create_engine(
