@@ -47,6 +47,10 @@ def _sqlalchemy_engine(host: str, port: int) -> sa.engine.Engine:
 
 
 def _clean_inplace(src: Path) -> None:
+    """
+    Atomically overwrite *src* so that '', NaN, NULL → \\N
+    (MySQL’s NULL sentinel for LOAD DATA / mysqlsh import-table).
+    """
     print(f"[clean] Overwriting {src.name} …")
     t0 = time.perf_counter()
 
@@ -62,10 +66,12 @@ def _clean_inplace(src: Path) -> None:
 
         for i, row in enumerate(reader, 1):
             writer.writerow(
-                ("\N" if (cell := cell.strip()) in {"", "nan", "NaN", "NULL"} else cell)
+                (
+                    "\\N" if (s := cell.strip()) in {"", "nan", "NaN", "NULL"} else s
+                )
                 for cell in row
             )
-            if i % _PROGRESS_EVERY == 0:                    # always prints
+            if i % _PROGRESS_EVERY == 0:
                 print(f"[clean]   … {i:,} rows rewritten")
 
     os.replace(tmp_path, src)
