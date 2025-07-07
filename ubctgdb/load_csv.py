@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import csv
 import os
+import shutil
 import subprocess
-import sys
 import tempfile
 import time
+import pyarrow as pa
+import pyarrow.csv as pacsv
+
 from collections import OrderedDict
 from pathlib import Path
 from typing import Mapping
@@ -13,40 +16,22 @@ from typing import Mapping
 import sqlalchemy as sa
 from dotenv import find_dotenv, load_dotenv
 
-try:
-    import pyarrow.csv as pacsv
-    import pyarrow as pa
-except ModuleNotFoundError as exc:  # Arrow is mandatory
-    raise ImportError(
-        "pyarrow >= 14 is required for load_csv(). "
-        "Install with:  pip install pyarrow"
-    ) from exc
 
-
-# ── environment ───────────────────────────────────────────────────────────────
+# ── environment ────────────────────────────────────────────────────────────
 dotenv_path = find_dotenv(usecwd=True)
 if dotenv_path:
     load_dotenv(dotenv_path, override=False)
 
-DEFAULT_DB_PORT = int(os.getenv("DB_PORT", "3306"))
-
-# ── constants ────────────────────────────────────────────────────────────────
-_PROGRESS_EVERY = 500_000  # rows between console prints during cleaning
-
-_INT_LIMITS = [
-    ("TINYINT",   -128,                     127,                    255),
-    ("SMALLINT",  -32768,                   32767,                  65535),
-    ("MEDIUMINT", -8388608,                 8388607,                16777215),
-    ("INT",       -2147483648,              2147483647,             4294967295),
-    ("BIGINT",    -9223372036854775808,     9223372036854775807,    18446744073709551615),
-]
+DEFAULT_DB_PORT: int = int(os.getenv("DB_PORT", "3306"))
+_PROGRESS_EVERY: int = 500_000             # always print every N lines
 
 
-# ── helpers ───────────────────────────────────────────────────────────────────
-def _q(ident: str) -> str:
-    if "`" in ident:
+# ── helpers ────────────────────────────────────────────────────────────────
+def _q(identifier: str) -> str:
+    """Back-tick quote a MySQL identifier."""
+    if "`" in identifier:
         raise ValueError("back-tick in identifier")
-    return f"`{ident}`"
+    return f"`{identifier}`"
 
 
 def _sqlalchemy_engine(host: str, port: int) -> sa.engine.Engine:
@@ -63,7 +48,8 @@ def _sqlalchemy_engine(host: str, port: int) -> sa.engine.Engine:
 
 def _clean_inplace(src: Path) -> None:
     """
-    Replace *src* atomically by a version where '', NaN, NULL → \\N.
+    Atomically overwrite *src* so that '', NaN, NULL → \N
+    (MySQL’s NULL sentinel for LOAD DATA / mysqlsh import-table).
     """
     print(f"[clean] Overwriting {src.name} …")
     t0 = time.perf_counter()
@@ -72,35 +58,27 @@ def _clean_inplace(src: Path) -> None:
     os.close(fd)
     tmp_path = Path(tmp_name)
 
-    with (
-        open(src, newline="", encoding="utf-8") as fin,
-        open(tmp_path, "w", newline="", encoding="utf-8") as fout,
-    ):
+    with src.open(newline="", encoding="utf-8") as fin, \
+         tmp_path.open("w", newline="", encoding="utf-8") as fout:
+
         reader = csv.reader(fin)
         writer = csv.writer(fout, lineterminator="\n", quoting=csv.QUOTE_MINIMAL)
 
         for i, row in enumerate(reader, 1):
             writer.writerow(
-                [
-                    r"\N" if cell.strip() in {"", "nan", "NaN", "NULL"} else cell
-                    for cell in row
-                ]
+                ("\N" if (cell := cell.strip()) in {"", "nan", "NaN", "NULL"} else cell)
+                for cell in row
             )
-            if _PROGRESS_EVERY and i % _PROGRESS_EVERY == 0:
+            if i % _PROGRESS_EVERY == 0:                    # always prints
                 print(f"[clean]   … {i:,} rows rewritten")
 
     os.replace(tmp_path, src)
     print(f"[clean] Done in {time.perf_counter() - t0:.1f} s")
 
 
-def _infer_with_arrow(
-    path: Path,
-    *,
-    header: bool,
-    delimiter: str = ",",
-) -> OrderedDict[str, str]:
+def _infer_with_arrow(path: Path, *, header: bool) -> OrderedDict[str, str]:
     """
-    Use PyArrow to scan the cleaned CSV and map Arrow types → MySQL types.
+    Scan the (cleaned or original) CSV with PyArrow and map Arrow → MySQL types.
     """
     print("[infer] PyArrow schema inference …")
     t0 = time.perf_counter()
@@ -111,7 +89,7 @@ def _infer_with_arrow(
             autogenerate_column_names=not header,
             skip_rows=1 if header else 0,
         ),
-        parse_options=pacsv.ParseOptions(delimiter=delimiter),
+        # default delimiter “,” – no ParseOptions needed
     )
 
     col_types: OrderedDict[str, str] = OrderedDict()
@@ -122,26 +100,20 @@ def _infer_with_arrow(
             col_types[name] = "TINYINT UNSIGNED"
 
         elif pa.types.is_integer(pa_t):
-            bits = pa_t.bit_width
-            signed = pa_t.is_signed
-            mysql = {8: "TINYINT", 16: "SMALLINT",
-                     32: "INT", 64: "BIGINT"}[bits]
+            mysql = {8: "TINYINT", 16: "SMALLINT", 32: "INT", 64: "BIGINT"}[pa_t.bit_width]
+            signed = pa.types.is_signed_integer(pa_t)         # robust signedness check
             col_types[name] = mysql if signed else f"{mysql} UNSIGNED"
 
         elif pa.types.is_floating(pa_t):
             col_types[name] = "DOUBLE"
 
         elif pa.types.is_decimal(pa_t):
-            p = pa_t.precision
-            s = pa_t.scale
+            p, s = pa_t.precision, pa_t.scale
             col_types[name] = f"DECIMAL({p},{s})" if p <= 38 else "DOUBLE"
 
         else:  # string, binary, etc.
-            # Find max length quickly via compute kernel
             max_len = pa.compute.max(pa.compute.utf8_length(col)).as_py()
-            col_types[name] = (
-                "TEXT" if max_len > 255 else f"VARCHAR({max_len})"
-            )
+            col_types[name] = "TEXT" if max_len > 255 else f"VARCHAR({max_len})"
 
     print(f"[infer] Finished in {time.perf_counter() - t0:.1f} s "
           f"({len(col_types)} columns)")
@@ -158,11 +130,11 @@ def _create_table(
 ) -> None:
     ddl_cols = ",\n  ".join(f"{_q(c)} {t}" for c, t in col_types.items())
     ddl = (
+        f"CREATE DATABASE IF NOT EXISTS {_q(schema)};\n"
         f"CREATE TABLE IF NOT EXISTS {_q(schema)}.{_q(table)} (\n  "
         f"{ddl_cols}\n) ENGINE=InnoDB;"
     )
     with _sqlalchemy_engine(host, port).begin() as conn:
-        conn.execute(sa.text(f"CREATE DATABASE IF NOT EXISTS {_q(schema)};"))
         conn.execute(sa.text(ddl))
 
 
@@ -179,8 +151,11 @@ def _mysqlsh_import(
     skip_rows: int,
     replace_duplicates: bool,
 ) -> None:
+    if not shutil.which("mysqlsh"):
+        raise RuntimeError("mysqlsh not found; install MySQL Shell ≥ 8.0.22")
+
     uri = f"mysql://{os.getenv('DB_USER')}:{os.getenv('DB_PASS')}@{host}:{port}"
-    cmd = [
+    cmd: list[str] = [
         "mysqlsh",
         uri,
         "--",
@@ -193,14 +168,15 @@ def _mysqlsh_import(
         f"--dialect={dialect}",
         f"--threads={threads}",
         f"--skipRows={skip_rows}",
-        "--showProgress=true",  # built-in progress bar
+        "--showProgress=true",               # built-in progress bar (always on)
     ]
     if replace_duplicates:
         cmd.append("--onDuplicateKeyUpdate")
+
     subprocess.run(cmd, check=True)
 
 
-# ── public API ────────────────────────────────────────────────────────────────
+# ── public API ─────────────────────────────────────────────────────────────
 def load_csv(
     *,
     csv_path: str | Path,
@@ -212,40 +188,43 @@ def load_csv(
     dialect: str = "csv-unix",
     threads: int = 8,
     replace_duplicates: bool = False,
+    clean: bool = True,                     # ← NEW FLAG
 ) -> None:
     """
-    Clean a large CSV **in-place**, infer column types with PyArrow, and bulk-load
-    it into MySQL using MySQL Shell’s parallel importer.
+    Import a (large) CSV into MySQL via MySQL-Shell’s parallel importer.
+
+    Steps:
+      1. **Optionally** clean the CSV in-place (''/NaN/NULL → \N).
+      2. Infer column types with PyArrow.
+      3. Create the destination table if needed.
+      4. Bulk-load with `mysqlsh util import-table`.
 
     Parameters
     ----------
-    csv_path : path-like
-        The CSV file to import (will be overwritten with a cleaned copy ⚠).
-    table : str
-        Destination table name.
-    header : bool, default True
-        True  → first row holds column names.  
-        False → no header; columns auto-named col1, col2, …
-    replace_duplicates : bool
-        If True, pass `--onDuplicateKeyUpdate` to mysqlsh.
+    csv_path : str | Path
+        Path to the CSV file (will be overwritten if `clean=True`).
+    clean : bool, default True
+        If False, skip step 1 (useful if the file is already in MySQL-friendly
+        form or you need maximum speed).
     """
     src = Path(csv_path).expanduser()
     if not src.exists():
         raise FileNotFoundError(src)
 
     schema = schema or os.getenv("DB_NAME")
-    host = host or os.getenv("DB_HOST")
-    port = port or DEFAULT_DB_PORT
+    host   = host   or os.getenv("DB_HOST")
+    port   = port   or DEFAULT_DB_PORT
     if not schema or not host:
         raise RuntimeError("DB_HOST and DB_NAME must be set (env or argument)")
 
-    # 1 · Clean (in-place)
-    _clean_inplace(src)
+    # 1 · Clean (optional)
+    if clean:
+        _clean_inplace(src)
 
-    # 2 · Infer types (PyArrow)
+    # 2 · Infer types
     col_types = _infer_with_arrow(src, header=header)
 
-    # 3 · Create table if missing
+    # 3 · Create table (if absent)
     _create_table(
         host=host,
         port=port,
