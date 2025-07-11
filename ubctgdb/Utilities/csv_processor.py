@@ -116,16 +116,17 @@ def check_for_type_equality(df, py_dict: dict, sql_dict: dict):
 
     return True
 
-def try_parse(param, type_lambda):
-    try:
-        type_lambda(param)
-        return True
-    except ValueError:
-        return False
-
-#quick chatGPT function to infer data type of string
 def infer_str_type(value: str) -> str:
-    # Strip surrounding whitespace
+    '''
+    Infers the type of a string value and returns a string representation of the type.
+    '''
+    def try_parse(param, type_lambda):
+        try:
+            type_lambda(param)
+            return True
+        except ValueError:
+            return False
+        
     value = value.strip()
 
     # Handle empty or null-like values
