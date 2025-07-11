@@ -1,6 +1,7 @@
 import sqlalchemy as sa
-from ubctgdb.Constants.configuration import Config
-from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
+from Constants.configuration import Config
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
 from functools import wraps
 
 def singleton(class_):
@@ -44,14 +45,14 @@ class DBConn:
         self.engine = None
         self.sessionmaker = None
 
-    async def connect(self):
+    def connect(self):
         '''
         connects to the database
         '''
         try:
             if not self.sessionmaker:
-                self.engine = create_async_engine(build_conn_url(), echo=False)
-                self.sessionmaker = async_sessionmaker(bind=self.engine, expire_on_commit=False)
+                self.engine = create_engine(build_conn_url(), echo=False)
+                self.sessionmaker = sessionmaker(bind=self.engine)
         except Exception:
             raise
         return self
@@ -61,7 +62,7 @@ class DBConn:
         return self.sessionmaker
 
     @require_connection
-    async def execute(self, query, params=None):
-        async with self.sessionmaker() as session:
-            result = await session.execute(query, params or {})
+    def execute(self, query, params=None):
+        with self.sessionmaker() as session:
+            result = session.execute(query, params or {})
             return result.fetchall()
