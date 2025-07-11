@@ -21,7 +21,13 @@ def write_csv_to_table(selected_table, conn) -> None:
         return
     
     df = pd.DataFrame(pd.read_csv(file_path) if file_extenstion == "csv" else pd.read_excel(file_path))
-    do_csv_work(df, selected_table, conn)
+    if not is_integrity_preserved(df, selected_table, conn):
+        print("CSV cannot be parsed into database (FAILURE)")
+        return
+    if not insert_csv_to_db(conn, selected_table, df):
+        print("Insertion failed (FAILURE)")
+
+    print("Insertion successful (SUCCESS)")
 
 def insert_csv_to_db(conn, table_name, df):
     '''
@@ -48,18 +54,6 @@ def insert_csv_to_db(conn, table_name, df):
             print(f"SQL command: {sql_command}")
             print(f"Row data: {dict(row)}")
             return False
-
-def do_csv_work(df, selected_table, conn) -> None:
-    '''
-    checks the integrity of the data now before inserting
-    '''
-    if not is_integrity_preserved(df, selected_table, conn):
-        print("CSV cannot be parsed into database (FAILURE)")
-        return
-    
-    if not insert_csv_to_db(conn, selected_table, df):
-        print("Insertion failed (FAILURE)")
-    print("Insertion successful (SUCCESS)")
 
 def is_integrity_preserved(df, selected_table, conn) -> bool:
     query = f"""
