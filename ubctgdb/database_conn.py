@@ -2,17 +2,7 @@ import sqlalchemy as sa
 from ubctgdb.Constants.configuration import Config
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 from functools import wraps
-
-def singleton(class_):
-    '''
-    singleton class decorator enforcing one connection
-    '''
-    instances = {}
-    def getinstance(*args, **kwargs):
-        if class_ not in instances:
-            instances[class_] = class_(*args, **kwargs)
-        return instances[class_]
-    return getinstance
+import ubctgdb.singleton as Singleton
 
 def require_connection(func):
     '''
@@ -38,8 +28,9 @@ def build_conn_url():
         database=Config._database
     )
 
-@singleton
 class DBConn:
+    __metaclass__ = Singleton
+    
     def __init__(self):
         self.engine = None
         self.sessionmaker = None
@@ -64,4 +55,5 @@ class DBConn:
     async def execute(self, query, params=None):
         async with self.sessionmaker() as session:
             result = await session.execute(query, params or {})
-            return result.fetchall()
+            rows = result.fetchall()
+            return [dict(row._mapping) for row in rows]

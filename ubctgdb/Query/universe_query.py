@@ -5,6 +5,8 @@ from ubctgdb.Constants.constants import Ratio
 from sqlalchemy import text
 import random
 import pandas as pd
+import ubctgdb.Query.queries as Queries
+import json
 
 
 class UniverseQuery:
@@ -24,7 +26,7 @@ class UniverseQuery:
         '''
         uses resevoir pooling algorithm to uniformly choose subset of universe query
         '''
-        init_query = self.query_reader.get_query_text("universe_init_query")
+        init_query = self.query_reader.safe_get_query_text("universe_init_query")
         sessionmaker = self.conn_instance.get_session()
 
         async with sessionmaker() as session:
@@ -42,9 +44,11 @@ class UniverseQuery:
 
    
     async def init_universe(self):
-        init_query = self.query_reader.get_query_text("universe_init_query")
-        return await self.conn_instance.execute(text(init_query), {"sector": str(self.sector)})
-    
+        init_query = self.query_reader.safe_get_query_text(Queries.SqlQuery.UNIVERSE_INIT_QUERY)
+        val = await self.conn_instance.execute(init_query, {"sector": str(self.sector)})
+        return json.dumps(val)
     async def get_universe_metric(self, ratio: Ratio):
-        ratio_query = self.query_reader.get_query_text("ratios_query")
-        return await self.conn_instance.execute(text(ratio_query), {"ratio": str(ratio)})
+        ratio_query = self.query_reader.safe_get_query_text(Queries.SqlQuery.RATIO_QUERY)
+
+        val = await self.conn_instance.execute(ratio_query, {"ratio": str(ratio), "industry": str(self.sector)})
+        return json.dumps(val)

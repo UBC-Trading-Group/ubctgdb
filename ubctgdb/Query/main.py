@@ -16,11 +16,18 @@ async def get_sector_ratios(ratio: str):
         return {"result": "ROE logic"}
     else:
         raise HTTPException(status_code=400, detail="Invalid ratio")
-
-
+    
+@app.get("/tdgb-v1/query/")
+async def test():
+    universe_query = await QueryFactory.create_universe_query(Sector.ENERGY, capacity=10)
+    #test = await universe_query.init_universe()
+    test = await universe_query.get_universe_metric(Ratio.MarketCap)
+    
+    print(test)
+    return {"result": test}
 
 async def main():
-    universe_query = await QueryFactory.create_universe_query(Sector.ENERGY, capacity=10) 
+    universe_query = await QueryFactory.create_universe_query(Sector.FINANCIALS, capacity=10) 
     test = await universe_query.get_universe_metric(Ratio.MarketCap)
     print(test)
 
