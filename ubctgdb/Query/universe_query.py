@@ -45,10 +45,16 @@ class UniverseQuery:
    
     async def init_universe(self):
         init_query = self.query_reader.safe_get_query_text(Queries.SqlQuery.UNIVERSE_INIT_QUERY)
-        val = await self.conn_instance.execute(init_query, {"sector": str(self.sector)})
-        return json.dumps(val)
+        data = await self.conn_instance.execute(init_query, {"sector": str(self.sector)})
+        return json.dumps(data)
     async def get_universe_metric(self, ratio: Ratio):
         ratio_query = self.query_reader.safe_get_query_text(Queries.SqlQuery.RATIO_QUERY)
 
-        val = await self.conn_instance.execute(ratio_query, {"ratio": str(ratio), "industry": str(self.sector)})
-        return json.dumps(val)
+        data = await self.conn_instance.execute(ratio_query, {"ratio": str(ratio), "industry": str(self.sector)})
+        return json.dumps(data)
+    
+    async def get_data(self, query_name: str):
+        query = self.query_reader.safe_get_query_text(query_name)
+        data = await self.conn_instance.execute(query)
+        return json.dumps(data, default=str)
+        

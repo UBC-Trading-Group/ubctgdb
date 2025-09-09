@@ -22,12 +22,12 @@ class Ratio(StrEnum):
     BookEquity = "be"
     BookToMarket = "bm"
     EnterpriseValueToMarketCap = "evm"
-    PriceToOperatingEarningsBasic = "pe_op_basic"
+    PriceToOperatingEarningsBasic = "pe_op_basic" #Adrian takes first 5 (up to here)
     PriceToOperatingEarningsDiluted = "pe_op_dil"
     PriceToEarningsExclItems = "pe_exi"
     PriceToEarningsInclItems = "pe_inc"
     PriceToSales = "ps"
-    PriceToCashFlow = "pcf"
+    PriceToCashFlow = "pcf" #Michael takes next 5 (up to here)  
     DividendPayoutRatio = "dpr"
     NetProfitMargin = "npm"
     OperatingMarginBeforeDep = "opmbd"
