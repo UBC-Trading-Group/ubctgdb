@@ -53,7 +53,7 @@ class UniverseQuery:
         data = await self.conn_instance.execute(ratio_query, {"ratio": str(ratio), "industry": str(self.sector)})
         return json.dumps(data)
     
-    async def get_data(self, query_name: str):
+    async def get_data(self, query_name: str): #todo: allow for connection parameters
         query = self.query_reader.safe_get_query_text(query_name)
         data = await self.conn_instance.execute(query)
         return json.dumps(data, default=str)

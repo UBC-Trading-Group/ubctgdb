@@ -12,6 +12,39 @@ import datetime
 
 app = FastAPI()
 
+def get_traits_df_on_day(daily_traits_json, date: str):
+    daily_traits_df = pd.DataFrame(json.loads(daily_traits_json))
+    daily_traits_df = daily_traits_df.rename(columns={"tic": "Ticker"})
+    traits_latest = daily_traits_df[daily_traits_df["datadate"] == date].copy() #second last date, it has more companies
+    
+    traits_latest["S&P Benchmark Weight"] = traits_latest["MarketCap"] / traits_latest["MarketCap"].sum()
+    traits_latest["S&P Benchmark Returns"] = traits_latest["S&P Benchmark Weight"] * traits_latest["returns"]
+    traits_latest = traits_latest.drop(columns=["datadate"])
+    return traits_latest
+
+@app.get("/tgdb-v1/tickers/traits/")
+async def get_traits():
+    universe_query = await QueryFactory.create_universe_query(Sector.FINANCIALS, capacity=10)
+    daily_traits = await universe_query.get_data(Queries.SqlQuery.TICKER_DAILY_TRAITS_QUERY)
+    traits_df = get_traits_df_on_day(daily_traits, "2025-07-03")
+
+    print("df", traits_df)
+    return {"status": "success", "data": traits_df}
+
+
+
+@app.get("/tgdb-v1/tickers/{gvkey}/traits/")
+async def get_traits_for_ticker(gvkey: str):
+    universe_query = await QueryFactory.create_universe_query(Sector.FINANCIALS, capacity=10)
+    daily_traits = await universe_query.get_data(Queries.SqlQuery.TICKER_DAILY_TRAITS_QUERY)
+    traits_df = get_traits_df_on_day(daily_traits, "2025-07-03")
+    traits_df = traits_df[traits_df["Ticker"] == gvkey.upper()].copy()
+    if len(traits_df) == 0:
+        raise HTTPException(status_code=404, detail=f"Ticker {gvkey.upper()} not found")
+
+    print("df", traits_df)
+    return {"status": "success", "data": traits_df}
+
 @app.get("/tgdb-v1/industries/")
 async def get_industries():
     universe_query = await QueryFactory.create_universe_query(Sector.FINANCIALS, capacity=10)
@@ -33,8 +66,8 @@ async def get_industries():
     traits_latest["S&P Benchmark Weight"] = traits_latest["MarketCap"] / traits_latest["MarketCap"].sum()
     traits_latest["S&P Benchmark Returns"] = traits_latest["S&P Benchmark Weight"] * traits_latest["returns"]
     traits_latest = traits_latest.drop(columns=["datadate"])
-
-    #print("two", traits_latest)
+    
+    print("two", traits_latest)
 
 
     sp_stock_to_industry = pd.merge(industries_df, traits_latest, on='Ticker')
