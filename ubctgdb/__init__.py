@@ -1,14 +1,11 @@
-__version__ = "0.2.0"
+"""Simple shared Parquet tables on Cloudflare R2."""
+from .core import (
+    list_tables, describe, preview, read_table, download_table,
+    upload_dataframe, upload_parquet,
+)
 
-from .core import run_sql
-from .upload_csv import upload_csv
-from .upload_df import upload_dataframe
-from .update import append_csv, append_dataframe
-
+__version__ = '1.0.0'
 __all__ = [
-    "run_sql",
-    "upload_csv",
-    "upload_dataframe",
-    "append_csv",
-    "append_dataframe",
+    'list_tables', 'describe', 'preview', 'read_table', 'download_table',
+    'upload_dataframe', 'upload_parquet',
 ]

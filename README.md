@@ -1,159 +1,82 @@
 # ubctgdb
 
-A lightweight helper for UBC Trading Group analysts to query MySQL data in Python with local disk-cache and secure credential handling.
+Upload, inspect and download shared pandas tables in a private **Cloudflare R2** bucket.
+Each table is one Parquet file. No database server, website or version history.
 
-## Features
+## Install
 
-| API | What it does |
-|-----|--------------|
-| `run_sql()` | Query MySQL and return a `pandas.DataFrame`, with transparent 24 h caching. |
-| `upload_csv()` | One-shot bulk load of a (potentially very large) CSV via **MySQL Shell parallel importer**. |
-| `upload_dataframe()` | Same as `upload_csv`, but starts from a `pandas` DataFrame. |
-| `append_csv()` / `append_dataframe()` | Efficient *append-only* (or “upsert”) loader—skips rows already in the destination table. |
+Python 3.9+:
 
-* Connection pooling via **SQLAlchemy** to avoid reconnect overhead.
-* **DiskCache** on-disk DataFrame cache keyed by query hash.
-* Shared *null* convention: the sentinel string `\N` becomes Python `NaN`/**`pd.NA`** and SQL `NULL` automatically.
-
----
-
-## Requirements
-
-* Python ≥ 3.9 (3.9 – 3.12 tested)
-* Core libraries  
-  `pandas ≥ 2.0`, `SQLAlchemy ≥ 2.0`, `diskcache ≥ 5.0`, `python-dotenv ≥ 1.0`
-* Bulk-load extras  
-  `pyarrow ≥ 10.0`, `mysqlclient ≥ 2.0` **or** `PyMySQL ≥ 1.0`, `tqdm ≥ 4.0`
-* **MySQL Shell ≥ 8.0** available on your `$PATH` for fast imports
-
----
-
-## Installation
-
-1. **macOS users:** install the MySQL client libraries:
-
-   ```bash
-   brew install mysql
-   ```
-
-2. Install the package directly from GitHub:
-
-   ```bash
-   pip install git+https://github.com/UBC-Trading-Group/ubctgdb.git
-   ```
-
----
-
-## Configuration
-
-Create a `.env` file alongside your scripts or notebooks:
-
-```dotenv
-DB_USER=my_username
-DB_PASS=super_secret_password
-DB_HOST=db.example.com
-DB_NAME=ubctg
+```bash
+pip install git+https://github.com/UBC-Trading-Group/ubctgdb.git@codex/r2-storage
+# From a local checkout instead:
+pip install -e .
 ```
 
----
+The branch installation works after the branch is pushed to GitHub.
 
-## Quick Start — Queries
+## Configure
+
+Put a `.env` in your notebook's working directory or a parent directory:
+
+```dotenv
+R2_ENDPOINT_URL=https://YOUR_ACCOUNT_ID.r2.cloudflarestorage.com
+R2_ACCESS_KEY_ID=your_access_key
+R2_SECRET_ACCESS_KEY=your_secret_key
+R2_BUCKET=ubctg-data
+```
+
+Use R2 S3 credentials scoped to this bucket: **Object Read only** for readers,
+**Object Read & Write** for publishers. No public bucket access is needed.
+Existing `endpoint`, `access_key` and `secret` settings also work; `R2_*` names
+take precedence. The Cloudflare management `token` is not used. Never commit `.env`.
+
+## Browse and read
 
 ```python
 import ubctgdb as db
 
-# Example 1: grab everything
-sql_all = '''
-SELECT *
-FROM Consumer_Sentiment;
-'''
-cs_all = db.run_sql(sql_all)
-print(cs_all.head())
+db.list_tables()                       # newest additions first
+db.list_tables(search="universe", sort_by="updated_at")
+db.describe("universe_fundamentals")    # summary and column types
+db.preview("universe_fundamentals", rows=20)
 
-# Example 2: date-bounded query
-start, end = '2020-01-01', '2021-12-31'
-sql_window = f'''
-SELECT date, umcsent
-FROM Consumer_Sentiment
-WHERE date BETWEEN '{start}' AND '{end}'
-ORDER BY date;
-'''
-cs_window = db.run_sql(sql_window)
-print(cs_window.tail())
-
-# Example 3: force a fresh pull (bypass cache)
-cs_fresh = db.run_sql(sql_window, refresh=True)
-print(cs_fresh.tail())
+df = db.read_table("universe_fundamentals")
+df = db.read_table("universe_fundamentals", columns=["date", "lpermno"])
+db.download_table("universe_fundamentals", "data/fundamentals.parquet")
 ```
 
----
+`list_tables()` returns a DataFrame; `describe()` returns a dictionary;
+`preview()` and `read_table()` return DataFrames; `download_table()` returns a Path.
+Listing shows dates, row/column counts, size in bytes and description.
+Use `ascending=True` to reverse sorting.
 
-## Bulk CSV Import
+## Upload
 
 ```python
-from ubctgdb import upload_csv
+db.upload_dataframe(df, table="factor/my_factor", description="Monthly factor values")
+db.upload_parquet("data/fundamentals.parquet", table="universe_fundamentals")
 
-upload_csv(
-    csv_path      = "/path/to/.csv",
-    table         = "table",
-    header        = None,            # None → auto-detect, True/False to force
-    replace_table = True,            # drop & recreate table
-    threads       = 8,              # mysqlsh parallel threads
-    clean         = True,            # ensures empty strings are null (overwrites csv)
-)
+# Explicitly replace the current table:
+db.upload_dataframe(df, table="factor/my_factor", replace_table=True)
 ```
 
-*Missing*, *empty*, or the strings `NaN`, `NULL`, `na`, `n/a` are normalised to `NULL` on the MySQL side.
+Uploads return a summary dictionary. Replacements preserve the original added date
+and description unless a new description is supplied. DataFrame indexes are not stored.
+Table names allow letters, numbers, `_`, `-`, and `/` for groups.
+Objects live at `tables/<name>.parquet`; descriptions and counts travel with the object.
 
----
+## Keep in mind
 
-## DataFrame Import
+- Replacing a table is permanent. Keep an independent backup and coordinate **one writer per table**; simultaneous writes are not locked.
+- Downloads use temporary files before replacing local output. Pass `overwrite=True` to replace an existing local file.
+- There is no persistent cache: each read downloads fresh data. Save a local Parquet file to reuse it.
+- `read_table(columns=...)` still downloads the whole file, but loads only selected columns into pandas. Allow disk space and RAM for your data.
+- Previews read Parquet ranges (up to 1,000 rows returned). Large source row groups can still require substantial transfer.
+- This is a breaking replacement for the MySQL package. SQL, append/upsert and CSV upload commands are removed. Convert CSV with pandas, then upload the DataFrame.
 
-```python
-import pandas as pd
-from ubctgdb import upload_dataframe
+## Development
 
-df = pd.read_csv("clean_prices.csv")
-upload_dataframe(
-    df,
-    table         = "clean_prices",
-    replace_table = False,   # CREATE TABLE IF NOT EXISTS …
-)
+```bash
+python -m unittest discover -s tests
 ```
-
-Internally, the function writes the DataFrame to a temp CSV and re-uses the same
-MySQL Shell importer as `upload_csv()`.
-
----
-
-## Incremental “Append-Only” Updates
-
-### 1.  From a CSV file
-
-```python
-from ubctgdb import append_csv
-
-append_csv(
-    csv_path = "daily_2025-07-06.csv",
-    table    = "daily",
-    key_cols = ["gvkey", "datadate"],     # composite primary key in MySQL
-    mode     = "staging",                 # default: bulk-load → INSERT IGNORE
-)
-```
-
-### 2.  From a DataFrame
-
-```python
-from ubctgdb import append_dataframe
-append_dataframe(
-    df,
-    table    = "daily",
-    key_cols = ["gvkey", "datadate"],
-)  
-```
-
-* `mode="staging"` (default) uses a temporary staging table + `INSERT IGNORE`
-  → safest for overlapping data.
-* `mode="watermark"` skips rows older than the current `MAX(date)`—ideal for
-  strictly append-only log/price feeds.
-
