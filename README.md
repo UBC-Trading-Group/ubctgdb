@@ -6,11 +6,19 @@ Browse, download and upload club tables.
 
 ## Install
 
-From the downloaded ubctgdb folder:
+Install directly from the `r2-storage` branch:
 
 ```bash
-pip install -e .
+pip install --upgrade git+https://github.com/UBC-Trading-Group/ubctgdb.git@r2-storage
 ```
+
+Or run this in a Jupyter notebook:
+
+```python
+%pip install --upgrade git+https://github.com/UBC-Trading-Group/ubctgdb.git@r2-storage
+```
+
+Restart the notebook kernel after installing.
 
 ## .env
 
