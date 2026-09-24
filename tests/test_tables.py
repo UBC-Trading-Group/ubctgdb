@@ -19,6 +19,10 @@ class Storage:
         self.objects = {}
         self.fail_download = False
         self.fail_upload = False
+        self.fail_copy = False
+        self.fail_delete = False
+        self.bad_copy = False
+        self.multipart = {}
 
     def upload_file(self, path, bucket, key, ExtraArgs):
         if self.fail_upload:
@@ -55,6 +59,41 @@ class Storage:
         Path(path).write_bytes(data[:10] if self.fail_download else data)
         if self.fail_download:
             raise IOError('Interrupted download')
+
+    def delete_object(self, Bucket, Key):
+        if self.fail_delete:
+            raise IOError('Delete failed')
+        self.objects.pop(Key, None)
+
+    def copy_object(self, Bucket, Key, CopySource, CopySourceIfMatch, MetadataDirective):
+        if self.fail_copy:
+            raise IOError('Copy failed')
+        data, head = self.objects[CopySource['Key']]
+        assert CopySourceIfMatch == head['ETag']
+        head = dict(head)
+        if self.bad_copy:
+            head['ContentLength'] += 1
+        self.objects[Key] = (data, head)
+
+    def create_multipart_upload(self, Bucket, Key, Metadata, ContentType):
+        self.multipart = {'key': Key, 'metadata': Metadata, 'parts': []}
+        return {'UploadId': 'test'}
+
+    def upload_part_copy(self, Bucket, Key, CopySource, UploadId, PartNumber, CopySourceRange):
+        if self.fail_copy:
+            raise IOError('Part copy failed')
+        start, end = map(int, CopySourceRange.removeprefix('bytes=').split('-'))
+        self.multipart['parts'].append(self.objects[CopySource['Key']][0][start:end + 1])
+        return {'CopyPartResult': {'ETag': str(PartNumber)}}
+
+    def complete_multipart_upload(self, Bucket, Key, UploadId, MultipartUpload):
+        data = b''.join(self.multipart['parts'])
+        self.objects[Key] = (data, dict(Metadata=self.multipart['metadata'], ContentLength=len(data),
+            ETag=hashlib.sha256(data).hexdigest(), LastModified=datetime.now(timezone.utc)))
+        self.multipart = {}
+
+    def abort_multipart_upload(self, **kwargs):
+        self.multipart = {}
 
 
 class TablesTest(unittest.TestCase):
@@ -119,6 +158,49 @@ class TablesTest(unittest.TestCase):
             db.preview('test', -1)
         with self.assertRaises(ValueError):
             db.read_table('../outside')
+
+    def test_rename_and_delete(self):
+        first = db.upload_dataframe(self.frame, table='old', description='Keep metadata')
+        db.upload_dataframe(self.frame, table='occupied')
+        with self.assertRaises(FileExistsError):
+            db.rename_table('old', 'occupied')
+        with self.assertRaises(ValueError):
+            db.rename_table('old', 'old')
+        self.assertEqual(db.rename_table('old', 'new'), {'old_name': 'old', 'new_name': 'new'})
+        info = db.describe('new')
+        self.assertEqual(info['created_at'], first['created_at'])
+        self.assertEqual(info['description'], first['description'])
+        pd.testing.assert_frame_equal(db.read_table('new'), self.frame)
+        with self.assertRaises(FileNotFoundError):
+            db.describe('old')
+        self.assertEqual(db.delete_table('new'), {'table': 'new', 'deleted': True})
+        with self.assertRaises(FileNotFoundError):
+            db.delete_table('new')
+
+    def test_rename_failures_retain_original(self):
+        db.upload_dataframe(self.frame, table='old')
+        for flag, error in [('fail_copy', IOError), ('bad_copy', IOError), ('fail_delete', RuntimeError)]:
+            with self.subTest(flag=flag):
+                setattr(self.storage, flag, True)
+                with self.assertRaises(error):
+                    db.rename_table('old', 'new')
+                setattr(self.storage, flag, False)
+                pd.testing.assert_frame_equal(db.read_table('old'), self.frame)
+                if flag == 'fail_delete':
+                    pd.testing.assert_frame_equal(db.read_table('new'), self.frame)
+                self.storage.objects.pop('tables/new.parquet', None)
+
+    def test_multipart_rename_and_abort(self):
+        db.upload_dataframe(self.frame, table='old', description='Multipart')
+        with patch.object(core, '_COPY_LIMIT', 1), patch.object(core, '_COPY_PART_SIZE', 1000):
+            self.storage.fail_copy = True
+            with self.assertRaises(IOError):
+                db.rename_table('old', 'new')
+            self.assertEqual(self.storage.multipart, {})
+            self.storage.fail_copy = False
+            db.rename_table('old', 'new')
+        pd.testing.assert_frame_equal(db.read_table('new'), self.frame)
+        self.assertEqual(db.describe('new')['description'], 'Multipart')
 
 
 if __name__ == '__main__':

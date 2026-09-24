@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="ubctgdb",
-    version="1.0.0",
+    version="1.1.0",
     packages=find_packages(include=["ubctgdb", "ubctgdb.*"]),
     install_requires=[
         "boto3>=1.36,<2",

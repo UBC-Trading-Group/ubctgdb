@@ -139,4 +139,34 @@ Example output:
 example_prices_copy 3
 ```
 
+### Rename a table
+
+```python
+print(db.rename_table("example_prices_copy", "example_prices_renamed"))
+```
+
+Example output:
+
+```text
+{'old_name': 'example_prices_copy', 'new_name': 'example_prices_renamed'}
+```
+
+The new name must be unused. Data and description are preserved; update your notebooks to use the new name.
+
+### Delete a table
+
+```python
+print(db.delete_table("example_prices_renamed"))
+```
+
+Example output:
+
+```text
+{'table': 'example_prices_renamed', 'deleted': True}
+```
+
+Deletion is permanent. These examples remove only the practice copy, keeping `example_prices`.
+
 Use your own table name when uploading real work. `replace_table=True` replaces existing data with no undo. Listing and displayed types may vary slightly.
+Coordinate one writer per table, including renames and deletions. Rename copies then deletes;
+if deletion fails, both names may remain. Check the names before retrying. These commands require write access.

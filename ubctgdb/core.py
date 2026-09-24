@@ -17,6 +17,8 @@ from botocore.exceptions import ClientError
 from dotenv import find_dotenv, load_dotenv
 
 PREFIX = 'tables/'
+_COPY_LIMIT = 5 * 1024**3
+_COPY_PART_SIZE = 64 * 1024**2
 SUMMARY_COLUMNS = ['table', 'created_at', 'updated_at', 'rows', 'columns', 'size_bytes', 'description']
 
 
@@ -220,3 +222,73 @@ def upload_dataframe(df, *, table, description=None, replace_table=False):
         path = Path(folder) / 'data.parquet'
         df.to_parquet(path, index=False, compression='zstd', row_group_size=10_000)
         return upload_parquet(path, table=table, description=description, replace_table=replace_table)
+
+
+def delete_table(table):
+    """Permanently delete a table. Missing names raise FileNotFoundError."""
+    key = _key(table)
+    client, bucket = _connection()
+    _head(client, bucket, key)
+    client.delete_object(Bucket=bucket, Key=key)
+    return {'table': table, 'deleted': True}
+
+
+def _copy_table(client, bucket, source, destination, head):
+    args = dict(Bucket=bucket, Key=destination, CopySource={'Bucket': bucket, 'Key': source})
+    if head['ContentLength'] <= _COPY_LIMIT:
+        client.copy_object(**args, CopySourceIfMatch=head['ETag'], MetadataDirective='COPY')
+        return
+    # R2 does not support conditional UploadPartCopy. Check the source again below.
+    upload = client.create_multipart_upload(
+        Bucket=bucket, Key=destination, Metadata=head.get('Metadata', {}),
+        ContentType=head.get('ContentType', 'application/vnd.apache.parquet'),
+    )
+    target = dict(Bucket=bucket, Key=destination, UploadId=upload['UploadId'])
+    try:
+        parts = []
+        part_size = max(_COPY_PART_SIZE, (head['ContentLength'] + 9999) // 10000)
+        for number, start in enumerate(range(0, head['ContentLength'], part_size), 1):
+            end = min(start + part_size, head['ContentLength']) - 1
+            result = client.upload_part_copy(
+                **args, UploadId=upload['UploadId'], PartNumber=number,
+                CopySourceRange=f'bytes={start}-{end}',
+            )
+            parts.append({'PartNumber': number, 'ETag': result['CopyPartResult']['ETag']})
+        client.complete_multipart_upload(**target, MultipartUpload={'Parts': parts})
+    except Exception:
+        try:
+            client.abort_multipart_upload(**target)
+        except Exception:
+            pass
+        raise
+
+
+def rename_table(old_name, new_name):
+    """Copy, verify size/metadata, then delete the old name. Coordinate one writer per name."""
+    source, destination = _key(old_name), _key(new_name)
+    if source == destination:
+        raise ValueError('The new name must differ from the old name.')
+    client, bucket = _connection()
+    before = _head(client, bucket, source)
+    try:
+        _head(client, bucket, destination)
+    except FileNotFoundError:
+        pass
+    else:
+        raise FileExistsError('Destination table already exists: ' + new_name)
+    _copy_table(client, bucket, source, destination, before)
+    after = _head(client, bucket, source)
+    copied = _head(client, bucket, destination)
+    if (before['ETag'] != after['ETag']
+            or before['ContentLength'] != copied['ContentLength']
+            or before.get('Metadata', {}) != copied.get('Metadata', {})
+            or before.get('Metadata', {}) != after.get('Metadata', {})):
+        raise IOError('Rename verification failed; original retained. Inspect both table names before retrying.')
+    try:
+        client.delete_object(Bucket=bucket, Key=source)
+    except Exception as exc:
+        raise RuntimeError(
+            f'Copied to {new_name}, but deletion of {old_name} was not confirmed. '
+            'Both names may exist; check before retrying.'
+        ) from exc
+    return {'old_name': old_name, 'new_name': new_name}
