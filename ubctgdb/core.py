@@ -15,6 +15,7 @@ import pyarrow.parquet as pq
 from botocore.config import Config
 from botocore.exceptions import ClientError
 from dotenv import find_dotenv, load_dotenv
+from . import cache as _cache
 
 PREFIX = 'tables/'
 _COPY_LIMIT = 5 * 1024**3
@@ -101,13 +102,20 @@ class _RemoteFile(io.RawIOBase):
         return data
 
 
-def list_tables(*, search=None, sort_by='created_at', ascending=False):
-    """Return table summaries, newest additions first. Search matches table names."""
+def list_tables(*, folder=None, search=None, sort_by='created_at', ascending=False):
+    """Return summaries including updated_at (UTC) and size_bytes, newest additions first."""
     if sort_by not in SUMMARY_COLUMNS:
         raise ValueError('Unknown sort column: ' + str(sort_by))
+    prefix = PREFIX
+    if folder is not None:
+        if not isinstance(folder, str):
+            raise ValueError('folder must be a table-name prefix')
+        folder = folder.rstrip('/')
+        _key(folder)
+        prefix += folder + '/'
     client, bucket = _connection()
     records = []
-    for page in client.get_paginator('list_objects_v2').paginate(Bucket=bucket, Prefix=PREFIX):
+    for page in client.get_paginator('list_objects_v2').paginate(Bucket=bucket, Prefix=prefix):
         for obj in page.get('Contents', []):
             key = obj['Key']
             if not key.endswith('.parquet'):
@@ -157,6 +165,10 @@ def download_table(table, destination, *, overwrite=False):
         raise FileExistsError('Destination exists; pass overwrite=True to replace it.')
     client, bucket = _connection()
     head = _head(client, bucket, key)
+    return _download(client, bucket, key, head, destination, overwrite)
+
+
+def _download(client, bucket, key, head, destination, overwrite=True):
     destination.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary = tempfile.mkstemp(suffix='.partial', dir=destination.parent)
     os.close(fd)
@@ -176,11 +188,28 @@ def download_table(table, destination, *, overwrite=False):
     return destination
 
 
-def read_table(table, *, columns=None):
-    """Download current data into pandas. No persistent cache; each call fetches anew."""
-    with tempfile.TemporaryDirectory(prefix='ubctgdb-') as folder:
-        path = download_table(table, Path(folder) / 'data.parquet')
-        return pd.read_parquet(path, columns=columns)
+def read_table(table, *, columns=None, refresh=False):
+    """Load current data using a local cache; refresh=True forces a new download."""
+    key = _key(table)
+    client, bucket = _connection()
+    return _cache.read(
+        _cache.scope(client, bucket), table, lambda: _head(client, bucket, key),
+        lambda path, head: _download(client, bucket, key, head, path), columns, refresh,
+    )
+
+
+def cache_info():
+    """List cached tables, byte sizes and last-use times for the configured bucket."""
+    client, bucket = _connection()
+    return _cache.info(_cache.scope(client, bucket))
+
+
+def clear_cache(table=None):
+    """Remove local cached files for one table or this bucket. Returns the number removed."""
+    if table is not None:
+        _key(table)
+    client, bucket = _connection()
+    return _cache.clear(_cache.scope(client, bucket), table)
 
 
 def upload_parquet(path, *, table, description=None, replace_table=False):
@@ -212,6 +241,7 @@ def upload_parquet(path, *, table, description=None, replace_table=False):
     client.upload_file(str(path), bucket, key, ExtraArgs={
         'Metadata': {'ubctgdb': metadata}, 'ContentType': 'application/vnd.apache.parquet',
     })
+    _cache.clear(_cache.scope(client, bucket), table)
     return _summary(table, _head(client, bucket, key))
 
 
@@ -230,6 +260,7 @@ def delete_table(table):
     client, bucket = _connection()
     _head(client, bucket, key)
     client.delete_object(Bucket=bucket, Key=key)
+    _cache.clear(_cache.scope(client, bucket), table)
     return {'table': table, 'deleted': True}
 
 
@@ -291,4 +322,6 @@ def rename_table(old_name, new_name):
             f'Copied to {new_name}, but deletion of {old_name} was not confirmed. '
             'Both names may exist; check before retrying.'
         ) from exc
+    for table in (old_name, new_name):
+        _cache.clear(_cache.scope(client, bucket), table)
     return {'old_name': old_name, 'new_name': new_name}

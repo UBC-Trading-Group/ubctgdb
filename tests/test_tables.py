@@ -6,6 +6,7 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
+from types import SimpleNamespace
 
 import pandas as pd
 from botocore.exceptions import ClientError
@@ -16,6 +17,8 @@ from ubctgdb import core
 
 class Storage:
     def __init__(self):
+        self.meta = SimpleNamespace(endpoint_url='https://test.r2.cloudflarestorage.com')
+        self.downloads = 0
         self.objects = {}
         self.fail_download = False
         self.fail_upload = False
@@ -55,6 +58,7 @@ class Storage:
         return {'Body': io.BytesIO(data[start:end + 1])}
 
     def download_file(self, bucket, key, path):
+        self.downloads += 1
         data = self.objects[key][0]
         Path(path).write_bytes(data[:10] if self.fail_download else data)
         if self.fail_download:
@@ -98,6 +102,11 @@ class Storage:
 
 class TablesTest(unittest.TestCase):
     def setUp(self):
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        root = patch.object(core._cache, 'ROOT', Path(folder.name))
+        root.start()
+        self.addCleanup(root.stop)
         self.storage = Storage()
         self.connection = patch.object(core, '_connection', return_value=(self.storage, 'test'))
         self.connection.start()
@@ -201,6 +210,73 @@ class TablesTest(unittest.TestCase):
             db.rename_table('old', 'new')
         pd.testing.assert_frame_equal(db.read_table('new'), self.frame)
         self.assertEqual(db.describe('new')['description'], 'Multipart')
+
+    def test_cache_freshness_refresh_and_isolation(self):
+        db.upload_dataframe(self.frame, table='test')
+        first = db.read_table('test')
+        first.loc[0, 'value'] = 999
+        pd.testing.assert_frame_equal(db.read_table('test'), self.frame)
+        self.assertEqual(self.storage.downloads, 1)
+        db.read_table('test', refresh=True)
+        self.assertEqual(self.storage.downloads, 2)
+        self.assertEqual(db.cache_info()['table'].tolist(), ['test'])
+        # Simulate a replacement from another machine, without local invalidation.
+        with patch.object(core._cache, 'clear'):
+            db.upload_dataframe(self.frame.iloc[:1], table='test', replace_table=True)
+        self.assertEqual(len(db.read_table('test')), 1)
+        self.assertEqual(self.storage.downloads, 3)
+        with patch.object(self.storage, 'head_object', side_effect=IOError('offline')):
+            with self.assertRaises(IOError):
+                db.read_table('test')
+        self.storage.meta.endpoint_url = 'https://other.r2.cloudflarestorage.com'
+        self.assertTrue(db.cache_info().empty)
+        db.read_table('test')
+        self.assertEqual(self.storage.downloads, 4)
+        self.assertEqual(db.clear_cache(), 1)
+        self.storage.meta.endpoint_url = 'https://test.r2.cloudflarestorage.com'
+        self.assertEqual(db.clear_cache('test'), 1)
+        self.assertEqual(db.describe('test')['rows'], 1)
+
+    def test_cache_limit_concurrency_and_invalidation(self):
+        from concurrent.futures import ThreadPoolExecutor
+        db.upload_dataframe(self.frame, table='one')
+        db.upload_dataframe(self.frame, table='two')
+        size = db.describe('one')['size_bytes']
+        with patch.object(core._cache, 'MAX_BYTES', size):
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                results = list(pool.map(db.read_table, ['one', 'one']))
+            self.assertEqual(self.storage.downloads, 1)
+            pd.testing.assert_frame_equal(results[0], results[1])
+            db.read_table('two')
+            self.assertEqual(db.cache_info()['table'].tolist(), ['two'])
+        with patch.object(core._cache, 'MAX_BYTES', 1):
+            db.read_table('one')
+            self.assertTrue(db.cache_info().empty)
+        db.read_table('one')
+        db.upload_dataframe(self.frame, table='one', replace_table=True)
+        self.assertTrue(db.cache_info().empty)
+        db.read_table('one')
+        db.rename_table('one', 'renamed')
+        self.assertTrue(db.cache_info().empty)
+        db.read_table('renamed')
+        db.delete_table('renamed')
+        self.assertTrue(db.cache_info().empty)
+        self.storage.fail_download = True
+        with self.assertRaises(IOError):
+            db.read_table('two')
+        self.assertTrue(db.cache_info().empty)
+        self.assertEqual(list(core._cache.ROOT.glob('*.partial')), [])
+
+    def test_folder_prefixes(self):
+        for name in ['raw/prices/september', 'raw/prices/october', 'raw/info', 'raw_backup/prices', 'top']:
+            db.upload_dataframe(self.frame, table=name)
+        self.assertEqual(len(db.list_tables()), 5)
+        self.assertEqual(len(db.list_tables(folder='raw/')), 3)
+        result = db.list_tables(folder='raw/prices', search='september')
+        self.assertEqual(result['table'].tolist(), ['raw/prices/september'])
+        self.assertTrue(db.list_tables(folder='missing').empty)
+        with self.assertRaises(ValueError):
+            db.list_tables(folder='../raw')
 
 
 if __name__ == '__main__':

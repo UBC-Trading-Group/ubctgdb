@@ -43,18 +43,20 @@ import ubctgdb as db
 ### List tables
 
 ```python
-print(db.list_tables()[["table", "rows"]].to_string(index=False))
+print(db.list_tables()[["table", "rows", "updated_at", "size_bytes"]].to_string(index=False))
 ```
 
-Example output:
+`updated_at` is the last file update in UTC. `size_bytes` is the stored Parquet file size in bytes (1 MB = 1,000,000 bytes).
+
+Example output (dates and sizes will vary):
 
 ```text
-                table    rows
-       example_prices       3
-universe_fundamentals 2331152
-universe_price_volume 2331152
-   universe_inclusion 2331152
-  universe_stock_info   14218
+                table    rows                updated_at  size_bytes
+       example_prices       3 2026-09-21T01:58:31+00:00        1748
+universe_fundamentals 2331152 2026-09-24T22:02:41+00:00   151556605
+universe_price_volume 2331152 2026-09-24T21:51:41+00:00    56587855
+   universe_inclusion 2331152 2026-09-24T21:51:27+00:00      256619
+  universe_stock_info   14218 2026-09-24T21:51:22+00:00      179255
 ```
 
 ### Describe a table
@@ -99,6 +101,37 @@ symbol  price
    BBB   20.0
    CCC   30.5
 ```
+
+### Caching
+
+Repeated reads reuse a local copy after checking R2 for changes.
+
+```python
+df = db.read_table("example_prices")
+df = db.read_table("example_prices", refresh=True)  # Download again
+
+db.cache_info()                        # Show cached tables and sizes
+db.clear_cache("example_prices")       # Clear one
+db.clear_cache()                       # Clear all for this bucket
+```
+
+The cache uses up to 10 GB across notebooks and buckets on your computer.
+Older unused files are removed automatically; larger files are read without keeping a cached copy.
+Clearing the cache never deletes shared tables. An internet connection is needed to check for changes.
+
+### Folders
+
+Use `/` in table names. Folders are created automatically.
+
+```python
+db.upload_dataframe(df, table="practice/prices", replace_table=True)
+df = db.read_table("practice/prices")
+
+db.list_tables()                   # All tables in all folders
+db.list_tables(folder="practice")  # This folder and its subfolders
+```
+
+Use the full name, such as `"practice/prices"`, when reading, renaming or deleting a table.
 
 ### Download a file
 
