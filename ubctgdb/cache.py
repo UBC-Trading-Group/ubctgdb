@@ -1,6 +1,7 @@
 """A bounded disk cache shared by notebooks, guarded by one process-safe lock."""
 import hashlib
 import json
+import math
 import os
 import tempfile
 import time
@@ -29,13 +30,24 @@ def _paths(scope, table):
 
 def _entries():
     for meta in ROOT.glob('*.json'):
+        data = meta.with_suffix('.parquet')
         try:
             info = json.loads(meta.read_text(encoding='utf-8'))
-            data = meta.with_suffix('.parquet')
-            if data.exists():
-                yield data, meta, info
-        except (ValueError, OSError):
+            valid = (
+                isinstance(info, dict)
+                and all(isinstance(info.get(key), str) for key in ('scope', 'table', 'etag'))
+                and type(info.get('size_bytes')) is int and info['size_bytes'] >= 0
+                and type(info.get('last_used')) in (int, float)
+                and math.isfinite(info['last_used']) and 0 <= info['last_used'] <= time.time() + 86400
+                and _paths(info['scope'], info['table'])[1] == meta
+                and data.exists() and data.stat().st_size == info['size_bytes']
+            )
+        except (ValueError, OSError, OverflowError):
+            valid = False
+        if not valid:
+            _remove(data, meta)
             continue
+        yield data, meta, info
 
 
 def _remove(data, meta):

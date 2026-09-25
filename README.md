@@ -2,7 +2,7 @@
 
 Browse, download and upload club tables.
 
-[Open the example notebook](examples/quickstart.ipynb).
+[Open the example notebook](quickstart.ipynb).
 
 ## Install
 
@@ -29,6 +29,7 @@ R2_ENDPOINT_URL=https://YOUR_ACCOUNT_ID.r2.cloudflarestorage.com
 R2_ACCESS_KEY_ID=your_access_key
 R2_SECRET_ACCESS_KEY=your_secret_key
 R2_BUCKET=ubctg-data
+YOUR_NAME=Alex
 ```
 
 ## Examples
@@ -40,26 +41,22 @@ The upload examples create or replace `example_prices_copy`, a shared practice t
 import ubctgdb as db
 ```
 
-### List tables
+### Find and inspect
+
+#### List tables
 
 ```python
-print(db.list_tables()[["table", "rows", "updated_at", "size_bytes"]].to_string(index=False))
+print(db.list_tables())
 ```
-
-`updated_at` is the last file update in UTC. `size_bytes` is the stored Parquet file size in bytes (1 MB = 1,000,000 bytes).
 
 Example output (dates and sizes will vary):
 
 ```text
-                table    rows                updated_at  size_bytes
-       example_prices       3 2026-09-21T01:58:31+00:00        1748
-universe_fundamentals 2331152 2026-09-24T22:02:41+00:00   151556605
-universe_price_volume 2331152 2026-09-24T21:51:41+00:00    56587855
-   universe_inclusion 2331152 2026-09-24T21:51:27+00:00      256619
-  universe_stock_info   14218 2026-09-24T21:51:22+00:00      179255
+            table  rows        updated_at     size updated_by
+0  example_prices     3  2026-09-25 21:53  1.75 KB       Alex
 ```
 
-### Describe a table
+#### Describe a table
 
 ```python
 print(db.describe("example_prices")["schema"])
@@ -71,7 +68,7 @@ Example output:
 {'symbol': 'large_string', 'price': 'double'}
 ```
 
-### Preview a table
+#### Preview a table
 
 ```python
 print(db.preview("example_prices").to_string(index=False))
@@ -86,7 +83,9 @@ symbol  price
    CCC   30.5
 ```
 
-### Read into pandas
+### Read and download
+
+#### Read into pandas
 
 ```python
 df = db.read_table("example_prices")
@@ -102,7 +101,7 @@ symbol  price
    CCC   30.5
 ```
 
-### Caching
+#### Caching
 
 Repeated reads reuse a local copy after checking R2 for changes.
 
@@ -119,7 +118,57 @@ The cache uses up to 10 GB across notebooks and buckets on your computer.
 Older unused files are removed automatically; larger files are read without keeping a cached copy.
 Clearing the cache never deletes shared tables. An internet connection is needed to check for changes.
 
-### Folders
+#### Download a file
+
+```python
+path = db.download_table("example_prices", "example_prices.parquet", overwrite=True)
+print(path.name)
+```
+
+Example output:
+
+```text
+example_prices.parquet
+```
+
+### Upload and organize
+
+#### Upload a DataFrame
+
+```python
+result = db.upload_dataframe(
+    df,
+    table="example_prices_copy",
+    description="Three fictional stock prices for practice.",
+    replace_table=True,
+)
+print(result["table"], result["rows"])
+print(db.describe("example_prices_copy")["description"])
+```
+
+Example output:
+
+```text
+example_prices_copy 3
+Three fictional stock prices for practice.
+```
+
+#### Upload a Parquet file
+
+```python
+result = db.upload_parquet("example_prices.parquet", table="example_prices_copy", replace_table=True)
+print(result["table"], result["rows"])
+print(db.describe("example_prices_copy")["description"])
+```
+
+Example output:
+
+```text
+example_prices_copy 3
+Three fictional stock prices for practice.
+```
+
+#### Folders
 
 Use `/` in table names. Folders are created automatically.
 
@@ -133,46 +182,7 @@ db.list_tables(folder="practice")  # This folder and its subfolders
 
 Use the full name, such as `"practice/prices"`, when reading, renaming or deleting a table.
 
-### Download a file
-
-```python
-path = db.download_table("example_prices", "example_prices.parquet", overwrite=True)
-print(path.name)
-```
-
-Example output:
-
-```text
-example_prices.parquet
-```
-
-### Upload a DataFrame
-
-```python
-result = db.upload_dataframe(df, table="example_prices_copy", replace_table=True)
-print(result["table"], result["rows"])
-```
-
-Example output:
-
-```text
-example_prices_copy 3
-```
-
-### Upload a Parquet file
-
-```python
-result = db.upload_parquet("example_prices.parquet", table="example_prices_copy", replace_table=True)
-print(result["table"], result["rows"])
-```
-
-Example output:
-
-```text
-example_prices_copy 3
-```
-
-### Rename a table
+#### Rename a table
 
 ```python
 print(db.rename_table("example_prices_copy", "example_prices_renamed"))
@@ -186,7 +196,7 @@ Example output:
 
 The new name must be unused. Data and description are preserved; update your notebooks to use the new name.
 
-### Delete a table
+#### Delete a table
 
 ```python
 print(db.delete_table("example_prices_renamed"))
@@ -198,8 +208,4 @@ Example output:
 {'table': 'example_prices_renamed', 'deleted': True}
 ```
 
-Deletion is permanent. These examples remove only the practice copy, keeping `example_prices`.
-
-Use your own table name when uploading real work. `replace_table=True` replaces existing data with no undo. Listing and displayed types may vary slightly.
-Coordinate one writer per table, including renames and deletions. Rename copies then deletes;
-if deletion fails, both names may remain. Check the names before retrying. These commands require write access.
+Deleting or replacing a table cannot be undone. Only one person should change a given table at a time.

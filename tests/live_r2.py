@@ -113,6 +113,27 @@ def run():
             root = Path(temp)
             with patch.object(core._cache, 'ROOT', root / 'cache'), \
                  patch.object(core, '_connection', return_value=(client, bucket)):
+                with patch.dict(os.environ, {'YOUR_NAME': 'Integration Alex'}):
+                    db.upload_dataframe(frame, table=names[0], description='Integration practice data.')
+                assert db.describe(names[0])['updated_by'] == 'Integration Alex'
+                with patch.dict(os.environ, {'YOUR_NAME': 'Integration Sam'}):
+                    db.upload_dataframe(frame, table=names[0], replace_table=True)
+                assert db.describe(names[0])['description'] == 'Integration practice data.'
+                assert db.list_tables(folder=prefix).iloc[0]['updated_by'] == 'Integration Sam'
+                with patch.dict(os.environ, {'YOUR_NAME': 'Integration Jo'}):
+                    db.rename_table(names[0], names[2])
+                assert db.describe(names[2])['updated_by'] == 'Integration Jo'
+                assert db.describe(names[2])['description'] == 'Integration practice data.'
+                with patch.dict(os.environ, {'YOUR_NAME': ''}), patch.object(core, '_COPY_LIMIT', 1):
+                    db.rename_table(names[2], names[0])
+                assert db.describe(names[0])['updated_by'] == ''
+                with patch.dict(os.environ, {'YOUR_NAME': ''}):
+                    db.upload_dataframe(frame, table=names[0], replace_table=True, description='')
+                assert db.describe(names[0])['description'] == ''
+                assert db.describe(names[0])['updated_by'] == ''
+                db.delete_table(names[0])
+                ok('attribution on upload/replace/rename, blank names and description preservation/clearing')
+
                 original = db.upload_dataframe(frame, table=names[0])
                 assert_frame_equal(db.read_table(names[0]), frame)
                 ok('upload/read preserves values, dtypes and nulls')
@@ -127,9 +148,9 @@ def run():
                 assert list(db.list_tables(folder=prefix, search='nested').table) == [names[1]]
                 for row in listing.to_dict('records'):
                     head = core._head(client, bucket, core._key(row['table']))
-                    assert row['size_bytes'] == head['ContentLength']
-                    assert row['updated_at'] == head['LastModified'].isoformat()
-                    assert row['rows'] == 3 and row['columns'] == 4
+                    assert row['size'] == core._file_size(head['ContentLength'])
+                    assert row['updated_at'] == head['LastModified'].strftime('%Y-%m-%d %H:%M')
+                    assert row['rows'] == 3
                 ok('listing metadata, all folders, nested folders and prefix boundaries')
 
                 db.clear_cache()

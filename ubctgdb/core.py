@@ -6,6 +6,7 @@ import json
 import os
 import re
 import tempfile
+import warnings
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -14,22 +15,29 @@ import pandas as pd
 import pyarrow.parquet as pq
 from botocore.config import Config
 from botocore.exceptions import ClientError
-from dotenv import find_dotenv, load_dotenv
+from dotenv import dotenv_values, find_dotenv
 from . import cache as _cache
 
 PREFIX = 'tables/'
 _COPY_LIMIT = 5 * 1024**3
 _COPY_PART_SIZE = 64 * 1024**2
-SUMMARY_COLUMNS = ['table', 'created_at', 'updated_at', 'rows', 'columns', 'size_bytes', 'description']
+SUMMARY_COLUMNS = ['table', 'created_at', 'updated_at', 'rows', 'columns', 'size_bytes', 'description', 'updated_by']
+
+
+def _settings():
+    # Read afresh without leaving old .env values in the notebook environment.
+    values = dict(dotenv_values(find_dotenv(usecwd=True)))
+    values.update(os.environ)
+    return values
 
 
 def _connection():
-    load_dotenv(find_dotenv(usecwd=True), override=False)
+    values = _settings()
     settings = {
-        'R2_ENDPOINT_URL': os.getenv('R2_ENDPOINT_URL') or os.getenv('endpoint'),
-        'R2_ACCESS_KEY_ID': os.getenv('R2_ACCESS_KEY_ID') or os.getenv('access_key'),
-        'R2_SECRET_ACCESS_KEY': os.getenv('R2_SECRET_ACCESS_KEY') or os.getenv('secret'),
-        'R2_BUCKET': os.getenv('R2_BUCKET'),
+        'R2_ENDPOINT_URL': values.get('R2_ENDPOINT_URL') or values.get('endpoint'),
+        'R2_ACCESS_KEY_ID': values.get('R2_ACCESS_KEY_ID') or values.get('access_key'),
+        'R2_SECRET_ACCESS_KEY': values.get('R2_SECRET_ACCESS_KEY') or values.get('secret'),
+        'R2_BUCKET': values.get('R2_BUCKET'),
     }
     missing = [key for key, value in settings.items() if not value]
     if missing:
@@ -64,7 +72,15 @@ def _summary(table, head):
     modified = head['LastModified'].isoformat()
     return dict(table=table, created_at=info.get('created_at', modified),
                 updated_at=modified, rows=info.get('rows'), columns=info.get('columns'),
-                size_bytes=head['ContentLength'], description=info.get('description', ''))
+                size_bytes=head['ContentLength'], description=info.get('description', ''),
+                updated_by=info.get('updated_by', ''))
+
+
+def _metadata(info):
+    encoded = json.dumps(info, ensure_ascii=True)
+    if len(encoded.encode('ascii')) > 1800:
+        raise ValueError('Table metadata is too long; shorten the description or YOUR_NAME.')
+    return encoded
 
 
 class _RemoteFile(io.RawIOBase):
@@ -73,9 +89,14 @@ class _RemoteFile(io.RawIOBase):
         self.client, self.bucket, self.key = client, bucket, key
         self.size, self.etag, self.position = head['ContentLength'], head['ETag'], 0
 
-    def readable(self): return True
-    def seekable(self): return True
-    def tell(self): return self.position
+    def readable(self):
+        return True
+
+    def seekable(self):
+        return True
+
+    def tell(self):
+        return self.position
 
     def seek(self, offset, whence=0):
         if whence not in (0, 1, 2):
@@ -102,8 +123,20 @@ class _RemoteFile(io.RawIOBase):
         return data
 
 
+def _file_size(size):
+    for unit in ('B', 'KB', 'MB', 'GB', 'TB'):
+        if size < 1000 or unit == 'TB':
+            return f'{size:.0f} B' if unit == 'B' else f'{size:.2f} {unit}'
+        size /= 1000
+
+
 def list_tables(*, folder=None, search=None, sort_by='created_at', ascending=False):
-    """Return summaries including updated_at (UTC) and size_bytes, newest additions first."""
+    """List names, rows, UTC update times to the minute and readable file sizes.
+
+    Newest additions first. Use describe() for exact bytes and full metadata.
+    """
+    if sort_by == 'size':
+        sort_by = 'size_bytes'
     if sort_by not in SUMMARY_COLUMNS:
         raise ValueError('Unknown sort column: ' + str(sort_by))
     prefix = PREFIX
@@ -124,9 +157,13 @@ def list_tables(*, folder=None, search=None, sort_by='created_at', ascending=Fal
             if search is not None and search.casefold() not in name.casefold():
                 continue
             records.append(_summary(name, _head(client, bucket, key)))
-    return pd.DataFrame(records, columns=SUMMARY_COLUMNS).sort_values(
+    result = pd.DataFrame(records, columns=SUMMARY_COLUMNS).sort_values(
         sort_by, ascending=ascending, kind='stable', ignore_index=True,
     )
+    result['size'] = result['size_bytes'].map(_file_size)
+    result['updated_at'] = result['updated_at'].map(
+        lambda value: datetime.fromisoformat(value).astimezone(timezone.utc).strftime('%Y-%m-%d %H:%M'))
+    return result[['table', 'rows', 'updated_at', 'size', 'updated_by']]
 
 
 def describe(table):
@@ -212,6 +249,17 @@ def clear_cache(table=None):
     return _cache.clear(_cache.scope(client, bucket), table)
 
 
+def _invalidate_cache(client, bucket, table):
+    try:
+        _cache.clear(_cache.scope(client, bucket), table)
+    except Exception as exc:
+        warnings.warn(
+            f'R2 change succeeded for {table}, but local cache cleanup failed '
+            f'({type(exc).__name__}). Use clear_cache() to retry cleanup.',
+            RuntimeWarning, stacklevel=2,
+        )
+
+
 def upload_parquet(path, *, table, description=None, replace_table=False):
     """Publish an existing Parquet file. Replacements have no history or undo."""
     key = _key(table)
@@ -227,27 +275,35 @@ def upload_parquet(path, *, table, description=None, replace_table=False):
         previous = None
     if previous is not None and not replace_table:
         raise FileExistsError('Table exists; pass replace_table=True to replace it.')
+    if description is None:
+        description = previous['description'] if previous else ''
     info = dict(
         created_at=previous['created_at'] if previous else datetime.now(timezone.utc).isoformat(),
-        description=description if description is not None else previous['description'] if previous else '',
-        rows=rows, columns=columns,
+        description=description,
+        rows=rows, columns=columns, updated_by=(_settings().get('YOUR_NAME') or '').strip(),
     )
     if not isinstance(info['description'], str):
         raise TypeError('description must be a string')
-    metadata = json.dumps(info, ensure_ascii=True)
-    if len(metadata.encode('ascii')) > 1800:
-        raise ValueError('Description is too long for object metadata; use a shorter description.')
+    metadata = _metadata(info)
     # Data and metadata become visible together after the upload completes.
     client.upload_file(str(path), bucket, key, ExtraArgs={
         'Metadata': {'ubctgdb': metadata}, 'ContentType': 'application/vnd.apache.parquet',
     })
-    _cache.clear(_cache.scope(client, bucket), table)
+    _invalidate_cache(client, bucket, table)
     return _summary(table, _head(client, bucket, key))
 
 
 def upload_dataframe(df, *, table, description=None, replace_table=False):
     """Publish a DataFrame as Zstandard-compressed Parquet, without its index."""
-    _key(table)
+    key = _key(table)
+    if not replace_table:
+        client, bucket = _connection()
+        try:
+            _head(client, bucket, key)
+        except FileNotFoundError:
+            pass
+        else:
+            raise FileExistsError('Table exists; pass replace_table=True to replace it.')
     with tempfile.TemporaryDirectory(prefix='ubctgdb-') as folder:
         path = Path(folder) / 'data.parquet'
         df.to_parquet(path, index=False, compression='zstd', row_group_size=10_000)
@@ -260,18 +316,19 @@ def delete_table(table):
     client, bucket = _connection()
     _head(client, bucket, key)
     client.delete_object(Bucket=bucket, Key=key)
-    _cache.clear(_cache.scope(client, bucket), table)
+    _invalidate_cache(client, bucket, table)
     return {'table': table, 'deleted': True}
 
 
-def _copy_table(client, bucket, source, destination, head):
+def _copy_table(client, bucket, source, destination, head, metadata):
     args = dict(Bucket=bucket, Key=destination, CopySource={'Bucket': bucket, 'Key': source})
     if head['ContentLength'] <= _COPY_LIMIT:
-        client.copy_object(**args, CopySourceIfMatch=head['ETag'], MetadataDirective='COPY')
+        client.copy_object(**args, CopySourceIfMatch=head['ETag'], MetadataDirective='REPLACE',
+                           Metadata=metadata, ContentType=head.get('ContentType', 'application/vnd.apache.parquet'))
         return
     # R2 does not support conditional UploadPartCopy. Check the source again below.
     upload = client.create_multipart_upload(
-        Bucket=bucket, Key=destination, Metadata=head.get('Metadata', {}),
+        Bucket=bucket, Key=destination, Metadata=metadata,
         ContentType=head.get('ContentType', 'application/vnd.apache.parquet'),
     )
     target = dict(Bucket=bucket, Key=destination, UploadId=upload['UploadId'])
@@ -307,12 +364,17 @@ def rename_table(old_name, new_name):
         pass
     else:
         raise FileExistsError('Destination table already exists: ' + new_name)
-    _copy_table(client, bucket, source, destination, before)
+    metadata = dict(before.get('Metadata', {}))
+    info = json.loads(metadata.get('ubctgdb', '{}'))
+    info.setdefault('created_at', before['LastModified'].isoformat())
+    info['updated_by'] = (_settings().get('YOUR_NAME') or '').strip()
+    metadata['ubctgdb'] = _metadata(info)
+    _copy_table(client, bucket, source, destination, before, metadata)
     after = _head(client, bucket, source)
     copied = _head(client, bucket, destination)
     if (before['ETag'] != after['ETag']
             or before['ContentLength'] != copied['ContentLength']
-            or before.get('Metadata', {}) != copied.get('Metadata', {})
+            or metadata != copied.get('Metadata', {})
             or before.get('Metadata', {}) != after.get('Metadata', {})):
         raise IOError('Rename verification failed; original retained. Inspect both table names before retrying.')
     try:
@@ -323,5 +385,5 @@ def rename_table(old_name, new_name):
             'Both names may exist; check before retrying.'
         ) from exc
     for table in (old_name, new_name):
-        _cache.clear(_cache.scope(client, bucket), table)
+        _invalidate_cache(client, bucket, table)
     return {'old_name': old_name, 'new_name': new_name}

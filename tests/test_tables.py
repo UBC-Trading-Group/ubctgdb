@@ -1,6 +1,7 @@
 """Small offline suite: real Parquet files with an in-memory storage client."""
 import hashlib
 import io
+import os
 import tempfile
 import unittest
 from datetime import datetime, timezone
@@ -69,12 +70,13 @@ class Storage:
             raise IOError('Delete failed')
         self.objects.pop(Key, None)
 
-    def copy_object(self, Bucket, Key, CopySource, CopySourceIfMatch, MetadataDirective):
+    def copy_object(self, Bucket, Key, CopySource, CopySourceIfMatch, MetadataDirective, Metadata, ContentType):
         if self.fail_copy:
             raise IOError('Copy failed')
         data, head = self.objects[CopySource['Key']]
         assert CopySourceIfMatch == head['ETag']
         head = dict(head)
+        head['Metadata'] = Metadata
         if self.bad_copy:
             head['ContentLength'] += 1
         self.objects[Key] = (data, head)
@@ -136,6 +138,50 @@ class TablesTest(unittest.TestCase):
             with self.assertRaises(FileExistsError):
                 db.download_table('copy', path)
 
+    def test_settings_reload_without_environment_pollution(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / '.env'
+            with patch.object(core, 'find_dotenv', return_value=str(path)), patch.dict(os.environ, {}, clear=True):
+                path.write_text('YOUR_NAME=Alex\nR2_BUCKET=first\n', encoding='utf-8')
+                self.assertEqual(core._settings()['YOUR_NAME'], 'Alex')
+                self.assertNotIn('YOUR_NAME', os.environ)
+                path.write_text('YOUR_NAME=Sam\nR2_BUCKET=second\n', encoding='utf-8')
+                self.assertEqual(core._settings()['YOUR_NAME'], 'Sam')
+                self.assertEqual(core._settings()['R2_BUCKET'], 'second')
+                path.write_text('R2_BUCKET=second\n', encoding='utf-8')
+                self.assertNotIn('YOUR_NAME', core._settings())
+                os.environ['R2_BUCKET'] = 'explicit'
+                self.assertEqual(core._settings()['R2_BUCKET'], 'explicit')
+
+    def test_corrupt_cache_metadata_recovers(self):
+        db.upload_dataframe(self.frame, table='cached')
+        for broken in ('{', '{}', '[]', '{"last_used": "bad"}'):
+            db.read_table('cached')
+            metadata = next(core._cache.ROOT.glob('*.json'))
+            metadata.write_text(broken, encoding='utf-8')
+            self.assertTrue(db.cache_info().empty)
+            self.assertEqual(list(core._cache.ROOT.glob('*.parquet')), [])
+            pd.testing.assert_frame_equal(db.read_table('cached'), self.frame)
+
+    def test_cache_cleanup_failure_does_not_hide_remote_success(self):
+        with patch.object(core._cache, 'clear', side_effect=PermissionError('locked')):
+            with self.assertWarnsRegex(RuntimeWarning, 'R2 change succeeded'):
+                receipt = db.upload_dataframe(self.frame, table='cleanup')
+            self.assertEqual(receipt['rows'], 3)
+            with self.assertWarnsRegex(RuntimeWarning, 'R2 change succeeded'):
+                db.rename_table('cleanup', 'cleanup-new')
+            pd.testing.assert_frame_equal(db.read_table('cleanup-new'), self.frame)
+            with self.assertWarnsRegex(RuntimeWarning, 'R2 change succeeded'):
+                self.assertTrue(db.delete_table('cleanup-new')['deleted'])
+        self.assertNotIn(core._key('cleanup-new'), self.storage.objects)
+
+    def test_duplicate_rejected_before_serialization(self):
+        db.upload_dataframe(self.frame, table='existing')
+        with patch.object(pd.DataFrame, 'to_parquet') as serialize:
+            with self.assertRaisesRegex(FileExistsError, 'replace_table=True'):
+                db.upload_dataframe(self.frame, table='existing')
+            serialize.assert_not_called()
+
     def test_replace_and_empty(self):
         first = db.upload_dataframe(self.frame, table='test', description='Keep me')
         with self.assertRaises(FileExistsError):
@@ -146,6 +192,24 @@ class TablesTest(unittest.TestCase):
         self.assertEqual(second['description'], 'Keep me')
         pd.testing.assert_frame_equal(db.read_table('test'), empty)
         self.assertTrue(db.preview('test').empty)
+
+    def test_updated_by_and_description(self):
+        with patch.dict(os.environ, {'YOUR_NAME': 'Alex'}):
+            db.upload_dataframe(self.frame, table='credit', description='Practice data.')
+        self.assertEqual(db.list_tables().iloc[0]['updated_by'], 'Alex')
+        with patch.dict(os.environ, {'YOUR_NAME': 'Sam'}):
+            db.upload_dataframe(self.frame, table='credit', replace_table=True)
+        self.assertEqual(db.describe('credit')['description'], 'Practice data.')
+        self.assertEqual(db.describe('credit')['updated_by'], 'Sam')
+        with patch.dict(os.environ, {'YOUR_NAME': 'Jo'}):
+            db.rename_table('credit', 'renamed-credit')
+        self.assertEqual(db.describe('renamed-credit')['updated_by'], 'Jo')
+        self.assertEqual(db.describe('renamed-credit')['description'], 'Practice data.')
+        with patch.dict(os.environ, {'YOUR_NAME': ''}), patch.object(core, '_COPY_LIMIT', 1):
+            db.rename_table('renamed-credit', 'anonymous')
+            db.upload_dataframe(self.frame, table='anonymous', replace_table=True, description='')
+        self.assertEqual(db.describe('anonymous')['updated_by'], '')
+        self.assertEqual(db.describe('anonymous')['description'], '')
 
     def test_failures_preserve_data_and_cleanup(self):
         db.upload_dataframe(self.frame, table='test')
