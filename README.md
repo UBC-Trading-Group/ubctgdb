@@ -6,16 +6,16 @@ Browse, download and upload club tables.
 
 ## Install
 
-Install directly from the `r2-storage` branch:
+Install directly:
 
 ```bash
-pip install --upgrade git+https://github.com/UBC-Trading-Group/ubctgdb.git@r2-storage
+pip install --upgrade git+https://github.com/UBC-Trading-Group/ubctgdb.git
 ```
 
 Or run this in a Jupyter notebook:
 
 ```python
-%pip install --upgrade git+https://github.com/UBC-Trading-Group/ubctgdb.git@r2-storage
+%pip install --upgrade git+https://github.com/UBC-Trading-Group/ubctgdb.git
 ```
 
 Restart the notebook kernel after installing.
@@ -49,7 +49,7 @@ import ubctgdb as db
 print(db.list_tables())
 ```
 
-Example output (dates and sizes will vary):
+Example output:
 
 ```text
             table  rows        updated_at     size updated_by
