@@ -9,13 +9,13 @@ Browse, download and upload club tables.
 Install directly:
 
 ```bash
-pip install --upgrade git+https://github.com/UBC-Trading-Group/ubctgdb.git@notebook-table-browser
+pip install --upgrade git+https://github.com/UBC-Trading-Group/ubctgdb.git
 ```
 
 Or run this in a Jupyter notebook:
 
 ```python
-%pip install --upgrade git+https://github.com/UBC-Trading-Group/ubctgdb.git@notebook-table-browser
+%pip install --upgrade git+https://github.com/UBC-Trading-Group/ubctgdb.git
 ```
 
 Restart the notebook kernel after installing.
