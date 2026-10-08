@@ -9,13 +9,13 @@ Browse, download and upload club tables.
 Install directly:
 
 ```bash
-pip install --upgrade git+https://github.com/UBC-Trading-Group/ubctgdb.git
+pip install --upgrade git+https://github.com/UBC-Trading-Group/ubctgdb.git@notebook-table-browser
 ```
 
 Or run this in a Jupyter notebook:
 
 ```python
-%pip install --upgrade git+https://github.com/UBC-Trading-Group/ubctgdb.git
+%pip install --upgrade git+https://github.com/UBC-Trading-Group/ubctgdb.git@notebook-table-browser
 ```
 
 Restart the notebook kernel after installing.
@@ -43,18 +43,25 @@ import ubctgdb as db
 
 ### Find and inspect
 
-#### List tables
+#### Browse tables in a notebook
 
 ```python
-print(db.list_tables())
+db.show_tables()                       # Alphabetical
+db.show_tables(sort_by="updated_at")   # Newest updates
+db.show_tables(folder="practice")      # One folder and its subfolders
 ```
 
-Example output:
+Shows folder headings, indented names, rows, last updated (UTC), size and updated by.
+Newest-update sorting orders folders by their latest update, then tables newest first within each folder.
+Run without `print()`. The example notebook includes illustrative rendered views.
 
-```text
-            table  rows        updated_at     size updated_by
-0  example_prices     3  2026-09-25 21:53  1.75 KB       Alex
+#### Get a DataFrame
+
+```python
+tables = db.list_tables()
 ```
+
+Returns a regular DataFrame, newest additions first.
 
 #### Describe a table
 

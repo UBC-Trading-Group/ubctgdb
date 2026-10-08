@@ -138,6 +138,32 @@ class TablesTest(unittest.TestCase):
             with self.assertRaises(FileExistsError):
                 db.download_table('copy', path)
 
+    def test_notebook_browser(self):
+        from ubctgdb.display import render_tables
+        for name in ('raw/z', 'processed/a', 'raw/a', 'top'):
+            db.upload_dataframe(self.frame, table=name)
+        self.storage.objects[core._key('raw/z')][1]['LastModified'] = datetime(2099, 1, 1, tzinfo=timezone.utc)
+        records = core._listing_records()
+        records[0]['updated_by'] = '<script>alert(1)</script>'
+        text = render_tables(records, 'table')
+        self.assertLess(text.index('title="processed/a"'), text.index('title="raw/a"'))
+        self.assertLess(text.index('title="raw/a"'), text.index('title="raw/z"'))
+        self.assertNotIn('<script>', text)
+        self.assertIn('&lt;script&gt;', text)
+        text = render_tables(records, 'updated_at')
+        self.assertLess(text.index('title="raw/z"'), text.index('title="raw/a"'))
+        self.assertLess(text.index('title="raw/a"'), text.index('title="processed/a"'))
+        self.assertIn('No tables found', render_tables([], 'table'))
+        with patch('IPython.display.display') as display:
+            self.assertIsNone(db.show_tables(folder='raw', search='z'))
+            html = display.call_args.args[0].data
+            self.assertIn('title="raw/z"', html)
+            self.assertNotIn('title="raw/a"', html)
+        self.assertIs(type(db.list_tables()), pd.DataFrame)
+        self.assertIn('table', db.list_tables().columns)
+        with self.assertRaises(ValueError):
+            db.show_tables(sort_by='invalid')
+
     def test_settings_reload_without_environment_pollution(self):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / '.env'

@@ -130,15 +130,7 @@ def _file_size(size):
         size /= 1000
 
 
-def list_tables(*, folder=None, search=None, sort_by='created_at', ascending=False):
-    """List names, rows, UTC update times to the minute and readable file sizes.
-
-    Newest additions first. Use describe() for exact bytes and full metadata.
-    """
-    if sort_by == 'size':
-        sort_by = 'size_bytes'
-    if sort_by not in SUMMARY_COLUMNS:
-        raise ValueError('Unknown sort column: ' + str(sort_by))
+def _listing_records(folder=None, search=None):
     prefix = PREFIX
     if folder is not None:
         if not isinstance(folder, str):
@@ -157,6 +149,16 @@ def list_tables(*, folder=None, search=None, sort_by='created_at', ascending=Fal
             if search is not None and search.casefold() not in name.casefold():
                 continue
             records.append(_summary(name, _head(client, bucket, key)))
+    return records
+
+
+def list_tables(*, folder=None, search=None, sort_by='created_at', ascending=False):
+    """Return a regular DataFrame, newest additions first, with UTC times."""
+    if sort_by == 'size':
+        sort_by = 'size_bytes'
+    if sort_by not in SUMMARY_COLUMNS:
+        raise ValueError('Unknown sort column: ' + str(sort_by))
+    records = _listing_records(folder, search)
     result = pd.DataFrame(records, columns=SUMMARY_COLUMNS).sort_values(
         sort_by, ascending=ascending, kind='stable', ignore_index=True,
     )
@@ -164,6 +166,21 @@ def list_tables(*, folder=None, search=None, sort_by='created_at', ascending=Fal
     result['updated_at'] = result['updated_at'].map(
         lambda value: datetime.fromisoformat(value).astimezone(timezone.utc).strftime('%Y-%m-%d %H:%M'))
     return result[['table', 'rows', 'updated_at', 'size', 'updated_by']]
+
+
+def show_tables(*, folder=None, search=None, sort_by='table'):
+    """Display grouped HTML in a notebook. Sort by table (A–Z) or updated_at (newest).
+
+    In updated order, folders are ordered by their newest table. Returns None.
+    """
+    if sort_by not in ('table', 'updated_at'):
+        raise ValueError('sort_by must be table or updated_at')
+    try:
+        from IPython.display import HTML, display
+    except ImportError as exc:
+        raise ImportError('show_tables requires IPython; use list_tables outside notebooks.') from exc
+    from .display import render_tables
+    display(HTML(render_tables(_listing_records(folder, search), sort_by)))
 
 
 def describe(table):
