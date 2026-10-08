@@ -141,12 +141,12 @@ def run():
                 db.upload_dataframe(frame, table=names[1])
                 db.upload_dataframe(frame, table=names[-1])
                 listing = db.list_tables(folder=prefix)
-                assert set(listing.table) == set(names[:2])
-                assert set(db.list_tables(folder=prefix + '/').table) == set(names[:2])
-                assert set(db.list_tables(folder=prefix + '/nested').table) == {names[1]}
-                assert set(names[:2]).issubset(set(db.list_tables().table))
-                assert list(db.list_tables(folder=prefix, search='nested').table) == [names[1]]
-                for row in listing.to_dict('records'):
+                assert set(listing.index.get_level_values('table')) == set(names[:2])
+                assert set(db.list_tables(folder=prefix + '/').index.get_level_values('table')) == set(names[:2])
+                assert set(db.list_tables(folder=prefix + '/nested').index.get_level_values('table')) == {names[1]}
+                assert set(names[:2]).issubset(set(db.list_tables().index.get_level_values('table')))
+                assert list(db.list_tables(folder=prefix, search='nested').index.get_level_values('table')) == [names[1]]
+                for row in listing.reset_index().to_dict('records'):
                     head = core._head(client, bucket, core._key(row['table']))
                     assert row['size'] == core._file_size(head['ContentLength'])
                     assert row['updated_at'] == head['LastModified'].strftime('%Y-%m-%d %H:%M')

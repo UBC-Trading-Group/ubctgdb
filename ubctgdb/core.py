@@ -130,10 +130,46 @@ def _file_size(size):
         size /= 1000
 
 
-def list_tables(*, folder=None, search=None, sort_by='created_at', ascending=False):
+def _render_listing(df):
+    """Render a (folder, table)-indexed frame with a blank line after the
+    header and between folder groups; falls back to the normal repr when
+    there's no folder/table index (e.g. after the caller reindexes) or the
+    frame is empty."""
+    if df.empty or df.index.names[:2] != ['folder', 'table']:
+        return pd.DataFrame.__repr__(df)
+    lines         = df.to_string().splitlines()
+    header, body  = lines[:2], lines[2:]
+    folders       = df.index.get_level_values('folder')
+    spaced        = []
+    for i, line in enumerate(body):
+        if i > 0 and folders[i] != folders[i - 1]:
+            spaced.append('')
+        spaced.append(line)
+    return '\n'.join(header + [''] + spaced)
+
+
+class _TableListing(pd.DataFrame):
+    """A DataFrame that prints with a blank line after the header and
+    between folder groups; behaves exactly like a normal DataFrame
+    otherwise (filtering, sorting, .loc, etc. all still work)."""
+
+    @property
+    def _constructor(self):
+        return _TableListing
+
+    def __repr__(self):
+        return _render_listing(self)
+
+
+def list_tables(*, folder=None, search=None, sort_by='table', ascending=True):
     """List names, rows, UTC update times to the minute and readable file sizes.
 
-    Newest additions first. Use describe() for exact bytes and full metadata.
+    Rows are indexed by (folder, table): folder is everything before the
+    last '/' in a table name ('' for a top-level table), always ordered
+    alphabetically. sort_by/ascending control the order of tables *within*
+    each folder (default: alphabetical). Use .loc['some/folder'] to pull
+    just that folder's rows out afterwards, or pass folder= to filter
+    before listing. Use describe() for exact bytes and full metadata.
     """
     if sort_by == 'size':
         sort_by = 'size_bytes'
@@ -157,13 +193,13 @@ def list_tables(*, folder=None, search=None, sort_by='created_at', ascending=Fal
             if search is not None and search.casefold() not in name.casefold():
                 continue
             records.append(_summary(name, _head(client, bucket, key)))
-    result = pd.DataFrame(records, columns=SUMMARY_COLUMNS).sort_values(
-        sort_by, ascending=ascending, kind='stable', ignore_index=True,
-    )
+    result = pd.DataFrame(records, columns=SUMMARY_COLUMNS)
+    result['folder'] = result['table'].map(lambda name: name.rsplit('/', 1)[0] if '/' in name else '')
+    result = result.sort_values(['folder', sort_by], ascending=[True, ascending], kind='stable', ignore_index=True)
     result['size'] = result['size_bytes'].map(_file_size)
     result['updated_at'] = result['updated_at'].map(
         lambda value: datetime.fromisoformat(value).astimezone(timezone.utc).strftime('%Y-%m-%d %H:%M'))
-    return result[['table', 'rows', 'updated_at', 'size', 'updated_by']]
+    return _TableListing(result.set_index(['folder', 'table'])[['rows', 'updated_at', 'size', 'updated_by']])
 
 
 def describe(table):

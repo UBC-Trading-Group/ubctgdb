@@ -124,7 +124,7 @@ class TablesTest(unittest.TestCase):
         self.assertTrue(db.list_tables().empty)
         receipt = db.upload_dataframe(self.frame, table='factor/test', description='Example é')
         self.assertEqual(receipt['rows'], 3)
-        self.assertEqual(db.list_tables()['table'].tolist(), ['factor/test'])
+        self.assertEqual(db.list_tables().index.get_level_values('table').tolist(), ['factor/test'])
         self.assertEqual(db.describe('factor/test')['schema']['id'], 'int64')
         pd.testing.assert_frame_equal(db.preview('factor/test', 2), self.frame.head(2))
         pd.testing.assert_frame_equal(db.read_table('factor/test'), self.frame)
@@ -133,8 +133,8 @@ class TablesTest(unittest.TestCase):
             path = db.download_table('factor/test', Path(folder) / 'test.parquet')
             pd.testing.assert_frame_equal(pd.read_parquet(path), self.frame)
             db.upload_parquet(path, table='copy')
-            self.assertEqual(db.list_tables()['table'].tolist(), ['copy', 'factor/test'])
-            self.assertEqual(db.list_tables(search='FACTOR')['table'].tolist(), ['factor/test'])
+            self.assertEqual(db.list_tables().index.get_level_values('table').tolist(), ['copy', 'factor/test'])
+            self.assertEqual(db.list_tables(search='FACTOR').index.get_level_values('table').tolist(), ['factor/test'])
             with self.assertRaises(FileExistsError):
                 db.download_table('copy', path)
 
@@ -337,7 +337,7 @@ class TablesTest(unittest.TestCase):
         self.assertEqual(len(db.list_tables()), 5)
         self.assertEqual(len(db.list_tables(folder='raw/')), 3)
         result = db.list_tables(folder='raw/prices', search='september')
-        self.assertEqual(result['table'].tolist(), ['raw/prices/september'])
+        self.assertEqual(result.index.get_level_values('table').tolist(), ['raw/prices/september'])
         self.assertTrue(db.list_tables(folder='missing').empty)
         with self.assertRaises(ValueError):
             db.list_tables(folder='../raw')
