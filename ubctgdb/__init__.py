@@ -1,13 +1,13 @@
 """Simple shared Parquet tables on Cloudflare R2."""
 from .core import (
-    list_tables, show_tables, describe, preview, read_table, download_table,
+    list_tables, describe, preview, read_table, download_table,
     upload_dataframe, upload_parquet, delete_table, rename_table,
     cache_info, clear_cache,
 )
 
-__version__ = '1.3.0'
+__version__ = '2.0.0'
 __all__ = [
-    'list_tables', 'show_tables', 'describe', 'preview', 'read_table', 'download_table',
+    'list_tables', 'describe', 'preview', 'read_table', 'download_table',
     'upload_dataframe', 'upload_parquet', 'delete_table', 'rename_table',
     'cache_info', 'clear_cache',
 ]

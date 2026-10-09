@@ -154,15 +154,31 @@ class TablesTest(unittest.TestCase):
         self.assertLess(text.index('title="raw/z"'), text.index('title="raw/a"'))
         self.assertLess(text.index('title="raw/a"'), text.index('title="processed/a"'))
         self.assertIn('No tables found', render_tables([], 'table'))
-        with patch('IPython.display.display') as display:
-            self.assertIsNone(db.show_tables(folder='raw', search='z'))
-            html = display.call_args.args[0].data
-            self.assertIn('title="raw/z"', html)
-            self.assertNotIn('title="raw/a"', html)
-        self.assertIs(type(db.list_tables()), pd.DataFrame)
+        html = db.list_tables(folder='raw', search='z')._repr_html_()
+        self.assertIn('title="raw/z"', html)
+        self.assertNotIn('title="raw/a"', html)
+        self.assertIsInstance(db.list_tables(), pd.DataFrame)
         self.assertIn('table', db.list_tables().columns)
         with self.assertRaises(ValueError):
-            db.show_tables(sort_by='invalid')
+            db.list_tables(sort_by='invalid')
+        self.assertFalse(hasattr(db, 'show_tables'))
+        listing = db.list_tables(sort_by='updated_at')
+        self.assertEqual(listing.iloc[0]['table'], 'raw/z')
+        self.assertIn('title="raw/z"', listing._repr_html_())
+        self.assertNotIn('title="raw/a"', listing[listing.table == 'raw/z']._repr_html_())
+        self.assertIsInstance(listing[['table']]._repr_html_(), str)
+        listing.columns = pd.MultiIndex.from_tuples([('info', c) for c in listing.columns])
+        self.assertIsInstance(listing._repr_html_(), str)
+        self.assertIn('No tables found', db.list_tables(folder='missing')._repr_html_())
+        info = db.describe('raw/z')
+        self.assertIsInstance(info, dict)
+        self.assertEqual(info['rows'], 3)
+        info['description'] = '<script>unsafe</script>'
+        info['schema']['<bad>'] = '<type>'
+        html = info._repr_html_()
+        self.assertNotIn('<script>', html)
+        self.assertIn('&lt;script&gt;', html)
+        self.assertIn('&lt;bad&gt;', html)
 
     def test_settings_reload_without_environment_pollution(self):
         with tempfile.TemporaryDirectory() as folder:

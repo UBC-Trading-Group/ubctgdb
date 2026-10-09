@@ -152,8 +152,14 @@ def _listing_records(folder=None, search=None):
     return records
 
 
-def list_tables(*, folder=None, search=None, sort_by='created_at', ascending=False):
-    """Return a regular DataFrame, newest additions first, with UTC times."""
+def list_tables(*, folder=None, search=None, sort_by='table', ascending=None):
+    """Return a DataFrame with a grouped notebook view. Default: alphabetical.
+
+    updated_at defaults to newest first. Folder and search filters apply to both views.
+    """
+    from .display import TableListing
+    if ascending is None:
+        ascending = sort_by != 'updated_at'
     if sort_by == 'size':
         sort_by = 'size_bytes'
     if sort_by not in SUMMARY_COLUMNS:
@@ -165,26 +171,16 @@ def list_tables(*, folder=None, search=None, sort_by='created_at', ascending=Fal
     result['size'] = result['size_bytes'].map(_file_size)
     result['updated_at'] = result['updated_at'].map(
         lambda value: datetime.fromisoformat(value).astimezone(timezone.utc).strftime('%Y-%m-%d %H:%M'))
-    return result[['table', 'rows', 'updated_at', 'size', 'updated_by']]
-
-
-def show_tables(*, folder=None, search=None, sort_by='table'):
-    """Display grouped HTML in a notebook. Sort by table (A–Z) or updated_at (newest).
-
-    In updated order, folders are ordered by their newest table. Returns None.
-    """
-    if sort_by not in ('table', 'updated_at'):
-        raise ValueError('sort_by must be table or updated_at')
-    try:
-        from IPython.display import HTML, display
-    except ImportError as exc:
-        raise ImportError('show_tables requires IPython; use list_tables outside notebooks.') from exc
-    from .display import render_tables
-    display(HTML(render_tables(_listing_records(folder, search), sort_by)))
+    listing = TableListing(result[['table', 'rows', 'updated_at', 'size', 'updated_by']])
+    listing._listing_sort = sort_by
+    listing._listing_ascending = ascending
+    listing._listing_times = {r['table']: r['updated_at'] for r in records}
+    return listing
 
 
 def describe(table):
-    """Return a summary dictionary, including the Parquet column names and types."""
+    """Return metadata and schema as a dictionary with a notebook HTML view."""
+    from .display import TableDescription
     key = _key(table)
     client, bucket = _connection()
     head = _head(client, bucket, key)
@@ -193,7 +189,7 @@ def describe(table):
             info = _summary(table, head)
             info.update(rows=parquet.metadata.num_rows, columns=len(parquet.schema_arrow),
                         schema={field.name: str(field.type) for field in parquet.schema_arrow})
-            return info
+            return TableDescription(info)
 
 
 def preview(table, rows=20):

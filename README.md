@@ -46,9 +46,9 @@ import ubctgdb as db
 #### Browse tables in a notebook
 
 ```python
-db.show_tables()                       # Alphabetical
-db.show_tables(sort_by="updated_at")   # Newest updates
-db.show_tables(folder="practice")      # One folder and its subfolders
+db.list_tables()                       # Alphabetical
+db.list_tables(sort_by="updated_at")   # Newest updates
+db.list_tables(folder="practice")      # One folder and its subfolders
 ```
 
 Shows folder headings, indented names, rows, last updated (UTC), size and updated by.
@@ -61,19 +61,16 @@ Run without `print()`. The example notebook includes illustrative rendered views
 tables = db.list_tables()
 ```
 
-Returns a regular DataFrame, newest additions first.
+Returns a DataFrame you can filter or use in code.
 
 #### Describe a table
 
 ```python
-print(db.describe("example_prices")["schema"])
+db.describe("example_prices")
 ```
 
-Example output:
-
-```text
-{'symbol': 'large_string', 'price': 'double'}
-```
+Displays the description, row count, size, dates, last updater and column types.
+Use without `print()` for the notebook view. Dictionary access still works: `db.describe("example_prices")["schema"]`.
 
 #### Preview a table
 
