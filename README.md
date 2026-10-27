@@ -105,23 +105,6 @@ symbol  price
    CCC   30.5
 ```
 
-#### Caching
-
-Repeated reads reuse a local copy after checking R2 for changes.
-
-```python
-df = db.read_table("example_prices")
-df = db.read_table("example_prices", refresh=True)  # Download again
-
-db.cache_info()                        # Show cached tables and sizes
-db.clear_cache("example_prices")       # Clear one
-db.clear_cache()                       # Clear all for this bucket
-```
-
-The cache uses up to 10 GB across notebooks and buckets on your computer.
-Older unused files are removed automatically; larger files are read without keeping a cached copy.
-Clearing the cache never deletes shared tables. An internet connection is needed to check for changes.
-
 #### Download a file
 
 ```python
@@ -172,20 +155,6 @@ example_prices_copy 3
 Three fictional stock prices for practice.
 ```
 
-#### Folders
-
-Use `/` in table names. Folders are created automatically.
-
-```python
-db.upload_dataframe(df, table="practice/prices", replace_table=True)
-df = db.read_table("practice/prices")
-
-db.list_tables()                   # All tables in all folders
-db.list_tables(folder="practice")  # This folder and its subfolders
-```
-
-Use the full name, such as `"practice/prices"`, when reading, renaming or deleting a table.
-
 #### Rename a table
 
 ```python
@@ -213,3 +182,34 @@ Example output:
 ```
 
 Deleting or replacing a table cannot be undone. Only one person should change a given table at a time.
+
+#### Caching
+
+Repeated reads reuse a local copy after checking R2 for changes.
+
+```python
+df = db.read_table("example_prices")
+df = db.read_table("example_prices", refresh=True)  # Download again
+
+db.cache_info()                        # Show cached tables and sizes
+db.clear_cache("example_prices")       # Clear one
+db.clear_cache()                       # Clear all for this bucket
+```
+
+The cache uses up to 10 GB across notebooks and buckets on your computer.
+Older unused files are removed automatically; larger files are read without keeping a cached copy.
+Clearing the cache never deletes shared tables. An internet connection is needed to check for changes.
+
+#### Folders
+
+Use `/` in table names. Folders are created automatically.
+
+```python
+db.upload_dataframe(df, table="practice/prices", replace_table=True)
+df = db.read_table("practice/prices")
+
+db.list_tables()                   # All tables in all folders
+db.list_tables(folder="practice")  # This folder and its subfolders
+```
+
+Use the full name, such as `"practice/prices"`, when reading, renaming or deleting a table.
